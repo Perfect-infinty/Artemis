@@ -103,8 +103,8 @@ async function askJson({ url, key, model, system, user, signal, onUsage, fetchIm
 const voterSystem = (b, brains, skillsIndex, agentsIndex) => `${personaText(b)}
 
 You are one voter in a council of ${brains.length} brains (${brains.map((x) => x.name).join(', ')}). Read the conversation end and decide how the user's latest message should be handled.
-Reply with JSON only, no other text:
-{"answerer":"<one brain name>","skills":["<skill names to load>"],"agents":["<helper agent names to delegate to>"],"reason":"<max 20 words>"}
+Reply with JSON only, no other text. Example of the shape (use real names from the lists, never copy the example values):
+{"answerer":"${brains[0].name}","skills":[],"agents":[],"reason":"A short factual question, no tools needed."}
 - answerer: the brain whose personality fits this message best (you may pick yourself).
 - skills: only skills from the list below that clearly match the task, otherwise [].
 - agents: only helper agents from the list below that are really needed (research, coding, writing, review), otherwise [] when the answerer can do it alone.
@@ -118,7 +118,7 @@ function tally(votes, brains) {
   const ok = votes.filter((v) => v.ok);
   const names = brains.map((b) => b.name);
   const count = {};
-  for (const v of ok) { const a = names.find((n) => n.toLowerCase() === String(v.answerer || '').toLowerCase()); if (a) count[a] = (count[a] || 0) + 1; }
+  for (const v of ok) { const a = names.find((n) => n.toLowerCase() === String(v.answerer || '').toLowerCase()) || names.find((n) => n === v.brain); if (a) count[a] = (count[a] || 0) + 1; } // an unreadable answerer counts as the voter's own pick
   let answerer = null; let best = 0;
   for (const n of names) if ((count[n] || 0) > best) { best = count[n]; answerer = n; }
   const need = ok.length >= 2 ? 2 : 1;
