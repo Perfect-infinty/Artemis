@@ -354,3 +354,19 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   assert.strictEqual(pv.cannotCallTools({ name: 'Claude proxy', baseUrl: 'http://localhost:3456/v1', noTools: false }), false);
   console.log('agent: text memory markers ok');
 }
+
+// DeepSeek writes calls as <｜DSML｜invoke ...> text with extra attributes: they become real calls; a cut-off one is recognised
+{
+  const a = require('../electron/agent.js');
+  const defs = [{ function: { name: 'create_artifact' } }];
+  const D = (t) => t.replace(/<(\/?)/g, '<$1｜DSML｜');
+  const full = D('<function_calls><invoke name="create_artifact"><parameter name="title" string="true">A 1</parameter><parameter name="n" string="false">5</parameter><parameter name="content" string="true"><!DOCTYPE html><p>hi</p></parameter></invoke></function_calls>').replace('<｜DSML｜/', '</｜DSML｜');
+  const calls = a.parsePseudoCalls(full, defs);
+  assert.strictEqual(calls.length, 1);
+  assert.deepStrictEqual(JSON.parse(calls[0].arguments), { title: 'A 1', n: 5, content: '<!DOCTYPE html><p>hi</p>' });
+  const cut = '<｜DSML｜invoke name="create_artifact"><｜DSML｜parameter name="content" string="true"><html>';
+  assert.strictEqual(a.parsePseudoCalls(cut, defs).length, 0);
+  assert.strictEqual(a.pseudoCallCutOff(cut), true);
+  assert.strictEqual(a.pseudoCallCutOff(full), false);
+  console.log('agent: DSML text calls ok');
+}

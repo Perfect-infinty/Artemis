@@ -136,20 +136,27 @@ function simplifySchemas(defs) {
 }
 
 // Some models (DeepSeek, Qwen) write a tool call as XML text instead of using the tool interface. Turn those into real calls.
+// DeepSeek wraps the tags as <｜DSML｜invoke name="x"> and adds attributes (string="true"): the wrapper is removed first.
+const unDsml = (text) => String(text || '').replace(/<(\/?)\s*[｜|]\s*DSML\s*[｜|]\s*/gi, '<$1');
+const hasPseudoCall = (text) => /<invoke\s+name\s*=/i.test(unDsml(text));
+/** True when a text-written call starts but never closes: the reply was cut off at the output limit. */
+const pseudoCallCutOff = (text) => { const t = unDsml(text); return /<invoke\s+name\s*=/i.test(t) && !/<\/invoke>/i.test(t); };
 function parsePseudoCalls(text, defs) {
   const names = new Set((defs || []).map((d) => d.function?.name));
   const out = [];
-  const re = /<invoke\s+name\s*=\s*["']([^"']+)["']\s*>([\s\S]*?)<\/invoke>/gi;
+  const re = /<invoke\s+name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/invoke>/gi;
+  const src = unDsml(text);
   let m;
-  while ((m = re.exec(String(text || '')))) {
+  while ((m = re.exec(src))) {
     if (!names.has(m[1])) continue;
     const args = {};
-    const pr = /<parameter\s+name\s*=\s*["']([^"']+)["']\s*>([\s\S]*?)<\/parameter>/gi;
+    const pr = /<parameter\s+name\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/parameter>/gi;
     let q;
     while ((q = pr.exec(m[2]))) {
-      const v = q[2].replace(/^\n|\n$/g, '');
+      const v = q[3].replace(/^\n|\n$/g, '');
       let val = v;
-      if (/^\s*(-?\d+(\.\d+)?|true|false|\[[\s\S]*\]|\{[\s\S]*\})\s*$/.test(v)) { try { val = JSON.parse(v); } catch {} }
+      const asString = /string\s*=\s*["']true["']/i.test(q[2]);
+      if (!asString && /^\s*(-?\d+(\.\d+)?|true|false|\[[\s\S]*\]|\{[\s\S]*\})\s*$/.test(v)) { try { val = JSON.parse(v); } catch {} }
       args[q[1]] = val;
     }
     out.push({ id: 'pseudo_' + Date.now().toString(36) + out.length, name: m[1], arguments: JSON.stringify(args) });
@@ -747,12 +754,17 @@ async function runAgent(opts) {
         } catch {}
       }
 
-      if (!result.toolCalls.length && /<invoke\s+name=/i.test(result.text || '') && pseudoRetries < 3) {
+      if (!result.toolCalls.length && hasPseudoCall(result.text) && pseudoRetries < 3) {
         const calls = parsePseudoCalls(result.text, defs);
         pseudoRetries++;
         if (calls.length) {
           result.toolCalls = calls;
-          result.text = String(result.text).replace(/<function_calls>|<\/function_calls>|<invoke[\s\S]*?<\/invoke>/gi, '').trim();
+          result.text = unDsml(result.text).replace(/<\/?function_calls>|<invoke[\s\S]*?<\/invoke>/gi, '').trim();
+        } else if (pseudoCallCutOff(result.text)) {
+          send({ type: 'notice', text: 'The model hit its output limit in the middle of a tool call, so nothing ran. Asking it to write a shorter version.' });
+          history.push({ role: 'assistant', content: 'My last reply was cut off at the output limit before the tool call finished, so nothing ran.' });
+          history.push({ role: 'user', content: '(Your tool call was cut off at the output limit and nothing ran. Make the content much shorter (compact CSS, no repeated markup, fewer sections) and call the tool again, through the tool-calling interface.)' });
+          continue;
         } else {
           history.push({ role: 'assistant', content: result.text });
           history.push({ role: 'user', content: '(That looks like a tool call written as text, and nothing ran. Use the tool-calling interface to call tools, never write calls as text. Carry on.)' });
@@ -833,4 +845,4 @@ async function runAgent(opts) {
   }
 }
 
-module.exports = { parsePseudoCalls, makeTagStripper, runAgent, buildSystem, pruneImages, compactHistory, summarizeHistory, summarizeAll, withCache, cacheable };
+module.exports = { parsePseudoCalls, hasPseudoCall, pseudoCallCutOff, makeTagStripper, runAgent, buildSystem, pruneImages, compactHistory, summarizeHistory, summarizeAll, withCache, cacheable };
