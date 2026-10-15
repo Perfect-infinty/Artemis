@@ -39,7 +39,6 @@ export default function TabBar({ tabs, active, info, onSelect, onClose, onNew, o
               <Icon name={f.running ? 'spinner' : f.awaiting ? 'warning' : f.icon} size={14} className="atab-ico" />
               {!t.pinned && <span className="atab-title">{f.title}</span>}
               {t.pinned ? <Icon name="pin" size={10} className="atab-pin" /> : <button className="atab-x" title="Close tab (⌘W)" onClick={(e) => { e.stopPropagation(); onClose(t.id); }}><Icon name="x" size={12} /></button>}
-              {i < 9 ? <span className="atab-key">{i + 1}</span> : null}
             </div>
           );
         })}
