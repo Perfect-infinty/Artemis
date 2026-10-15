@@ -112,6 +112,16 @@
 .top-pills .sel.pill-select.tools.off, .top-pills .sel.pill-select.agents.off { opacity: .7; }
 .top-pills .um-wrap { flex: none; }
 .atabbar-gap { flex: none; }
+/* the same controls stacked in the right bar */
+.side-controls { flex: none; padding: 10px 12px 12px; border-bottom: 1px solid var(--border); }
+.top-pills.stacked { flex-direction: column; align-items: stretch; gap: 6px; }
+.top-pills.stacked .sel.pill-select, .top-pills.stacked .pill-select.revote { width: 100%; max-width: none; height: 30px; padding: 0 10px; font-size: 13px; border-radius: 8px; justify-content: space-between; }
+.top-pills.stacked .sel.pill-select svg { display: inline-block; margin-left: auto; }
+.top-pills.stacked .um-wrap, .top-pills.stacked .um-wrap > button { width: 100%; }
+.um-row-btn { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; color: var(--muted); justify-content: flex-start; }
+.um-row-btn:hover { background: var(--hover); color: var(--text); }
+.top-pills.stacked .um-pop { left: 0; right: 0; width: auto; }
+.sp-body.prog h4.first { margin-top: 0; }
 
 /* split view */
 .split-wrap { flex: 1; display: flex; min-height: 0; min-width: 0; }

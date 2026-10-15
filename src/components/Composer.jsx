@@ -23,7 +23,7 @@ function useOutside(ref, on, cb) {
 }
 
 /** Usage button: today / this month at a glance, with limits when set. */
-function UsageMenu({ settings, chatId, model, onDetails, onLimits }) {
+function UsageMenu({ settings, chatId, model, onDetails, onLimits, stacked }) {
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState(null);
   const ref = useRef(null);
@@ -50,7 +50,7 @@ function UsageMenu({ settings, chatId, model, onDetails, onLimits }) {
   };
   return (
     <span className="um-wrap" ref={ref}>
-      <button className={`icon-btn ${open ? 'on' : ''}`} title="Usage" onClick={toggle}><Icon name="chart" size={17} /></button>
+      <button className={`icon-btn ${open ? 'on' : ''} ${stacked ? 'um-row-btn' : ''}`} title="Usage" onClick={toggle}><Icon name="chart" size={stacked ? 15 : 17} />{stacked && <span>Usage</span>}</button>
       {open && (
         <div className="um-pop">
           <div className="um-title">Usage</div>
@@ -121,10 +121,10 @@ function MicButton({ settings, onText, onVoiceSettings, onError }) {
   );
 }
 
-/** The per-chat switches (project, brain, tools, agents, permissions) and the usage button. They sit in the top bar, next to Progress. */
-export function ChatPills({ brains = [], brain, onBrain, councilPick, onRevote, tools, onTools, agents, onAgents, effort = 'auto', onEffort, perm, onPerm, projectId, projects = [], onProject, incognito, settings, chatId, model, onUsageDetails, onOpenSettings }) {
+/** The per-chat switches (project, brain, tools, agents, permissions) and the usage button. In the main chat they are stacked in the right bar (stacked), in a split pane they sit in its header. */
+export function ChatPills({ brains = [], brain, onBrain, councilPick, onRevote, tools, onTools, agents, onAgents, effort = 'auto', onEffort, perm, onPerm, projectId, projects = [], onProject, incognito, settings, chatId, model, onUsageDetails, onOpenSettings, stacked }) {
   return (
-    <div className="top-pills nodrag">
+    <div className={`top-pills nodrag ${stacked ? 'stacked' : ''}`}>
       {onBrain && brains.length > 0 && (
         <>
           <Select className="pill-select brain" title="Brain mode: who answers in this chat. Council: the three brains vote on who answers and which skills and agents to use." value={brain} onChange={(e) => onBrain(e.target.value)}>
@@ -167,7 +167,7 @@ export function ChatPills({ brains = [], brain, onBrain, councilPick, onRevote, 
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </Select>
       )}
-      <UsageMenu settings={settings} chatId={chatId} model={model} onDetails={onUsageDetails} onLimits={() => onOpenSettings('limits')} />
+      <UsageMenu stacked={stacked} settings={settings} chatId={chatId} model={model} onDetails={onUsageDetails} onLimits={() => onOpenSettings('limits')} />
     </div>
   );
 }

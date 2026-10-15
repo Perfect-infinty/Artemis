@@ -206,7 +206,7 @@ export function ArtifactPanel({ artifact, onClose, expanded, onExpand }) {
 
 const ICON_OF = { file: 'file', media: 'image', artifact: 'artifact' };
 
-export function ProgressPanel({ chat, onClose, expanded, onExpand, onOpenArtifact }) {
+export function ProgressPanel({ chat, onClose, expanded, onExpand, onOpenArtifact, controls }) {
   const [showAll, setShowAll] = useState(false);
   const { calls, done, total } = progressOf(chat);
   const { outputs, used } = summarize(chat);
@@ -226,8 +226,10 @@ export function ProgressPanel({ chat, onClose, expanded, onExpand, onOpenArtifac
   };
   return (
     <>
-      <Head title="Progress" onClose={onClose} expanded={expanded} onExpand={onExpand} />
+      <Head title="Chat" onClose={onClose} expanded={expanded} onExpand={onExpand} />
+      {controls && <div className="side-controls">{controls}</div>}
       <div className="sp-body prog">
+        <h4 className="first">Progress</h4>
         {total === 0 ? <div className="muted">Steps will appear here while the assistant works.</div> : (
           <ol className="steps">
             {calls.length > shownCalls.length && <li className="more"><button onClick={() => setShowAll(true)}>{calls.length - shownCalls.length} earlier steps</button></li>}

@@ -79,7 +79,8 @@ export default function App() {
 
   const [settingsTab, setSettingsTab] = useState('general');
   const [panel, setPanel] = useState(null); // { type: 'file', file } | { type: 'artifact', id }
-  const [showProgress, setShowProgress] = useState(false);
+  const [showProgress, setShowProgress] = useState(() => { try { return localStorage.getItem('artemis-chatbar') !== '0'; } catch { return true; } }); // the right bar: chat controls + progress
+  useEffect(() => { try { localStorage.setItem('artemis-chatbar', showProgress ? '1' : '0'); } catch {} }, [showProgress]);
   const [wide, setWide] = useState(false);
   const [spW, setSpW] = useState(() => loadWidth('zero.spW', 460));
   const [sbW, setSbW] = useState(() => loadWidth('zero.sbW', 280));
@@ -1081,14 +1082,8 @@ export default function App() {
   };
 
   const tabsBar = tabs && tabs.length > 0 ? <TabBar tabs={tabs} active={activeTab} info={tabInfo} onSelect={activateTab} onClose={closeTab} onNew={() => newTab()} onMenu={tabMenu} /> : null;
-  const topbar = (
-    <header className={`topbar drag ${sidebarHidden && mac ? 'pad-mac' : ''}`}>
-      <button className="icon-btn nodrag" title={`Sidebar (${mac ? '⌘' : 'Ctrl+'}\\)`} onClick={() => setSidebarHidden(!sidebarHidden)}><Icon name="sidebar" size={18} /></button>
-      {tabsBar || <div className="chat-title">{chatView ? chat.title : ''}</div>}
-      {!tabsBar && <span style={{ flex: 1 }} />}
-      {chatView && (
-        <>
-          <ChatPills chatId={chat.id} model={chat.model} settings={settings} incognito={chat.incognito}
+  const chatControls = chatView ? (
+    <ChatPills stacked chatId={chat.id} model={chat.model} settings={settings} incognito={chat.incognito}
             perm={chat.perm === 'auto' ? 'auto' : chat.perm ? 'ask' : (settings.autoApproveEdits ? 'auto' : 'ask')} onPerm={(v) => updateChat(chat.id, { perm: v })}
             agents={chat.agents || (settings.delegateEnabled === false ? 'off' : 'on')} onAgents={(v) => updateChat(chat.id, { agents: v })}
             tools={chat.tools || (settings.toolsEnabled === false ? 'off' : 'on')} onTools={(v) => updateChat(chat.id, { tools: v })}
@@ -1096,10 +1091,18 @@ export default function App() {
             projectId={chat.projectId} projects={projects} onProject={(id) => updateChat(chat.id, { projectId: id })}
             brains={brains} brain={brainOf(chat)} onBrain={(v) => { const b = brains.find((x) => x.slug === v); updateChat(chat.id, { brain: v, ...(b?.model ? { model: b.model } : {}), councilPick: null }); }} councilPick={chat.councilPick} onRevote={() => updateChat(chat.id, { councilPick: null })}
             onUsageDetails={() => setModal('usage')} onOpenSettings={(t) => { setSettingsTab(t || 'general'); setModal('settings'); }} />
+  ) : null;
+  const topbar = (
+    <header className={`topbar drag ${sidebarHidden && mac ? 'pad-mac' : ''}`}>
+      <button className="icon-btn nodrag" title={`Sidebar (${mac ? '⌘' : 'Ctrl+'}\\)`} onClick={() => setSidebarHidden(!sidebarHidden)}><Icon name="sidebar" size={18} /></button>
+      {tabsBar || <div className="chat-title">{chatView ? chat.title : ''}</div>}
+      {!tabsBar && <span style={{ flex: 1 }} />}
+      {chatView && (
+        <>
           {project?.folder && <button className="icon-btn nodrag" title={`Open folder: ${project.folder}`} onClick={() => api.openPath(project.folder)}><Icon name="external" size={16} /></button>}
-          {(chat.messages.length > 0) && (() => { const pr = progressOf(chat); return (
-            <button className={`step-chip nodrag ${showProgress && !panel ? 'on' : ''}`} onClick={() => { setPanel(null); setShowProgress(!(showProgress && !panel)); }} title={pr.total ? `Step ${pr.done} of ${pr.total}: progress and outputs` : 'Progress and outputs'}>
-              <Icon name="layers" size={14} /> {pr.total ? `${pr.done}/${pr.total}` : 'Progress'}
+          {(() => { const pr = progressOf(chat); return (
+            <button className={`step-chip nodrag ${showProgress && !panel ? 'on' : ''}`} onClick={() => { setPanel(null); setShowProgress(!(showProgress && !panel)); }} title={pr.total ? `Step ${pr.done} of ${pr.total}. Chat controls, progress and outputs` : 'Chat controls, progress and outputs'}>
+              <Icon name="sliders" size={14} /> {pr.total ? `${pr.done}/${pr.total}` : 'Chat'}
             </button>); })()}
         </>
       )}
@@ -1251,7 +1254,7 @@ export default function App() {
           <div className="resize-grip left" onMouseDown={dragPanel} onDoubleClick={() => { setSpW(460); saveWidth('zero.spW', 460); }} title="Drag to resize · double-click to reset" />
           {panel && panel.type === 'file' && <FilePanel file={panel.file} onClose={() => setPanel(null)} expanded={wide} onExpand={() => setWide(!wide)} />}
           {panel && panel.type === 'artifact' && <ArtifactPanel artifact={chat.artifacts && chat.artifacts[panel.id]} onClose={() => setPanel(null)} expanded={wide} onExpand={() => setWide(!wide)} />}
-          {!panel && <ProgressPanel chat={chat} onClose={() => setShowProgress(false)} expanded={wide} onExpand={() => setWide(!wide)} onOpenArtifact={(id) => setPanel({ type: 'artifact', id })} />}
+          {!panel && <ProgressPanel controls={chatControls} chat={chat} onClose={() => setShowProgress(false)} expanded={wide} onExpand={() => setWide(!wide)} onOpenArtifact={(id) => setPanel({ type: 'artifact', id })} />}
         </aside>
       )}
 
