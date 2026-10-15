@@ -14,9 +14,9 @@ class Win { constructor() { this.webContents = { on: noop, send: noop, setWindow
 Win.getAllWindows = () => [];
 const registered = {};
 const fake = {
-  app: { getPath: () => userData, whenReady: () => Promise.resolve(), requestSingleInstanceLock: () => true, on: noop, quit: noop, setLoginItemSettings: noop },
+  app: { getPath: () => userData, getVersion: () => '0.0.0-test', whenReady: () => Promise.resolve(), requestSingleInstanceLock: () => true, on: noop, quit: noop, setLoginItemSettings: noop },
   BrowserWindow: Win,
-  ipcMain: { handle: (n, fn) => { handlers[n] = fn; } },
+  ipcMain: { handle: (n, fn) => { handlers[n] = fn; }, on: noop, once: noop, removeHandler: noop },
   safeStorage: { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from('ENC:' + s), decryptString: (b) => { const t = b.toString(); if (!t.startsWith('ENC:')) throw new Error('bad'); return t.slice(4); } },
   shell: { openExternal: noop, openPath: noop, showItemInFolder: noop },
   Menu: { buildFromTemplate: () => ({}), setApplicationMenu: noop },
@@ -30,7 +30,8 @@ const fake = {
 };
 const orig = Module._load;
 Module._load = function (req, ...rest) { return req === 'electron' ? fake : orig.call(this, req, ...rest); };
-require(path.join(__dirname, '..', 'electron', 'main.js'));
+// main.js installs an uncaughtException handler, so a crash while loading would pass silently: fail loudly instead
+try { require(path.join(__dirname, '..', 'electron', 'main.js')); } catch (e) { console.error('main.js failed to load:', e); process.exit(1); }
 
 (async () => {
   await new Promise((r) => setTimeout(r, 300));
@@ -52,6 +53,12 @@ require(path.join(__dirname, '..', 'electron', 'main.js'));
   const raw = JSON.parse(fs.readFileSync(path.join(userData, 'settings.json'), 'utf8'));
   assert(!JSON.stringify(raw).includes('TOKEN-1'), 'token must be encrypted at rest');
   assert(registered['CommandOrControl+Shift+Space'], 'quick chat shortcut is registered');
+  // every channel the renderer can invoke must have a handler in main (guards against lost handlers when main.js is split up)
+  const pre = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.js'), 'utf8');
+  const wanted = [...new Set([...pre.matchAll(/invoke\('([a-zA-Z]+:[a-zA-Z]+)'/g)].map((m) => m[1]))];
+  const missing = wanted.filter((c) => !handlers[c]);
+  assert(wanted.length > 50, 'preload channel scan found the channels');
+  assert(!missing.length, 'missing IPC handlers: ' + missing.join(', '));
   console.log('main: all tests passed');
   process.exit(0);
 })().catch((e) => { console.error('FAILED:', e); process.exit(1); });
