@@ -737,9 +737,12 @@ export default function App() {
   const awaitingOf = (c) => c.messages.some((m) => (m.steps || []).some((st) => (st.toolCalls || []).some((t) => t.status === 'awaiting' || (t.agents || []).some((a) => a && (a.tools || []).some((x) => x.status === 'awaiting')))));
   const statusOf = (c) => (awaitingOf(c) ? 'awaiting' : isRunning(c.id) ? 'running' : null);
 
+  // Sidebar navigation: from a Settings / Memory / Usage / Connectors page tab it opens a new tab instead of being swallowed
+  const navView = (v) => { if (TAB_MODALS.includes(modal)) openTab({ view: v, chatId: currentRef.current, modal: null, settingsTab: 'general' }); else setView(v); };
   const select = (id) => {
     const other = (tabsRef.current || []).find((t) => t.id !== activeRef.current && t.s.view === 'chat' && t.s.chatId === id);
     if (other) { activateTab(other.id); return; } // already open in another tab: go there
+    if (TAB_MODALS.includes(modal)) { openTab({ view: 'chat', chatId: id, modal: null, settingsTab: 'general' }); return; } // a page is open: the chat gets its own tab
     // incognito chats vanish as soon as you leave them
     chats.filter((c) => c.incognito && c.id !== id).forEach((c) => { const run = runOf(c.id); if (run) api.abort(run[0]); });
     setChats((cs) => cs.filter((c) => !c.incognito || c.id === id));
@@ -1223,14 +1226,14 @@ export default function App() {
         hidden={sidebarHidden} chats={chats} projects={projects}
         onPinChat={(id) => setChats((cs) => cs.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)))}
         onPinProject={(id) => setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, pinned: !p.pinned } : p)))}
-        onOpenProject={(id) => setView({ project: id })} currentId={currentId} view={chatView ? 'chat' : 'other'} statusOf={statusOf}
+        onOpenProject={(id) => navView({ project: id })} currentId={currentId} view={chatView ? 'chat' : 'other'} statusOf={statusOf}
         onNewChat={() => newChat()} onNewIncognito={newIncognito} onSelect={select} onDelete={deleteChat}
         onRename={(id, title) => updateChat(id, { title })}
-        onHome={() => setView('home')} onProjects={() => setView('projects')} onSchedule={() => setView('schedule')} onSkills={() => setView('skills')} onAgents={() => setView('agents')} onAutomations={() => setView('automations')} onSentinel={toggleSentinel} sentinel={sent.state} onLogs={() => setView('logs')} agentCount={liveAgents(chats, runningIds).length} onPermissions={() => setModal('permissions')} onConnectors={() => setModal('connectors')}
+        onHome={() => navView('home')} onProjects={() => navView('projects')} onSchedule={() => navView('schedule')} onSkills={() => navView('skills')} onAgents={() => navView('agents')} onAutomations={() => navView('automations')} onSentinel={toggleSentinel} sentinel={sent.state} onLogs={() => navView('logs')} agentCount={liveAgents(chats, runningIds).length} onPermissions={() => setModal('permissions')} onConnectors={() => setModal('connectors')}
         onSettings={() => { setSettingsTab('general'); setModal('settings'); }} onMemory={() => setModal('memory')} onUsage={() => setModal('usage')}
-        onTerminal={() => { if (!termRef.current.tabs.length) newTermTab(); setView('terminal'); }}
+        onTerminal={() => { if (!termRef.current.tabs.length) newTermTab(); navView('terminal'); }}
         notes={{ items: notes.items, root: notes.root, active: view === 'note' ? notePath : null, onOpen: noteActions.open, onNew: (f) => noteActions.create(f), onNewFolder: noteActions.createFolder, onRename: noteActions.rename, onDelete: noteActions.remove, onMove: noteActions.move, onPickRoot: noteActions.pickRoot, onReveal: noteActions.reveal }}
-        onBrowser={() => setView('browser')}
+        onBrowser={() => navView('browser')}
         memoryCount={settings.memoryEnabled ? memory.length : 0} connectorCount={connectorCount}
       />
 
