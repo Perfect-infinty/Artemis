@@ -69,5 +69,9 @@ const b = require('../electron/brains');
   assert.strictEqual(r.answerer, 'Lancelot'); assert.deepStrictEqual(usage, { model: 'm', prompt: 10, completion: 5, estimated: false });
   assert.strictEqual(await b.askJson({ url: 'u', model: 'm', system: 's', user: 'u', fetchImpl: fake({ choices: [{ message: { content: 'no json here' } }] }) }), null);
   await assert.rejects(() => b.askJson({ url: 'u', model: 'm', system: 's', user: 'u', fetchImpl: fake({}, false) }), /HTTP 500/);
+  // reasoning text before the answer is ignored; a reply cut off by the token limit says so
+  const th = await b.askJson({ url: 'u', model: 'm', system: 's', user: 'u', fetchImpl: fake({ choices: [{ message: { content: '<think>maybe {"answerer":"X"}</think>{"answerer":"Galahad"}' } }] }) });
+  assert.strictEqual(th.answerer, 'Galahad');
+  await assert.rejects(() => b.askJson({ url: 'u', model: 'm', system: 's', user: 'u', fetchImpl: fake({ choices: [{ message: { content: '<think>long' }, finish_reason: 'length' }] }) }), /cut off/);
   console.log('brains: all tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });

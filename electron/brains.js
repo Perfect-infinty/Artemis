@@ -11,16 +11,16 @@ const MAX_VOTERS = 5;
 
 const BUILTIN = [
   {
-    name: 'Lancelot', role: 'The Analyst', description: 'Logical, fast and decisive. Gets to the point and picks the most efficient way to do the job.', model: '',
-    body: 'You are Lancelot, the analyst. You think in facts, numbers and trade-offs. You are direct and decisive: give the answer first, then the reasoning in a few lines. You prefer the most efficient path and say plainly when something is a bad idea. No small talk.'
+    name: 'Lancelot', role: 'The Architect', description: 'Logical, fast and decisive. Gets to the point and picks the most efficient way to do the job.', model: '',
+    body: 'You are Lancelot, the architect. You think in facts, numbers and trade-offs. You are direct and decisive: give the answer first, then the reasoning in a few lines. You prefer the most efficient path and say plainly when something is a bad idea. No small talk.'
   },
   {
     name: 'Galahad', role: 'The Guardian', description: 'Careful and thorough. Protects the user from mistakes, checks facts, thinks about risks and side effects.', model: '',
     body: 'You are Galahad, the guardian. You are careful, precise and protective of the user\'s interests. Check facts before stating them, point out risks, costs and side effects, and ask before doing anything hard to undo. Calm, steady tone. Thoroughness matters more to you than speed.'
   },
   {
-    name: 'Percival', role: 'The Companion', description: 'Warm, creative and intuitive. Good for writing, ideas, explaining things simply and talking things through.', model: '',
-    body: 'You are Percival, the companion. You are warm, curious and creative. Explain things in simple human words, offer fresh ideas and angles, and pay attention to how the user feels about the task. Friendly and a little playful, never wordy.'
+    name: 'Percival', role: 'The Unbound', description: 'Warm, creative and intuitive. Good for writing, ideas, explaining things simply and talking things through.', model: '',
+    body: 'You are Percival, the unbound. You are warm, curious and creative. Explain things in simple human words, offer fresh ideas and angles, and pay attention to how the user feels about the task. Friendly and a little playful, never wordy.'
   }
 ];
 
@@ -86,14 +86,16 @@ async function askJson({ url, key, model, system, user, signal, onUsage, fetchIm
   const res = await fetchImpl(url, {
     method: 'POST', signal,
     headers: { ...headersFor(url), 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
-    body: JSON.stringify({ model, stream: false, max_tokens: 350, temperature: 0.4, ...routingBody(url), messages: [{ role: 'system', content: system }, { role: 'user', content: user }] })
+    body: JSON.stringify({ model, stream: false, max_tokens: 1500, temperature: 0.4, ...routingBody(url), messages: [{ role: 'system', content: system }, { role: 'user', content: user }] })
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const j = await res.json();
   if (j.usage && onUsage) { try { onUsage({ model, prompt: j.usage.prompt_tokens || 0, completion: j.usage.completion_tokens || 0, estimated: false }); } catch {} }
-  const text = String((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '');
+  const ch = j.choices && j.choices[0];
+  // reasoning models may put their thinking in the text: drop it so a brace inside it is not mistaken for the answer
+  const text = String((ch && ch.message && ch.message.content) || '').replace(/<think>[\s\S]*?(<\/think>|$)/gi, '');
   const m = /\{[\s\S]*\}/.exec(text);
-  if (!m) return null;
+  if (!m) { if (ch && ch.finish_reason === 'length') throw new Error('The reply was cut off (token limit). Try a model without long reasoning.'); return null; }
   try { return JSON.parse(m[0]); } catch { return null; }
 }
 
@@ -146,7 +148,7 @@ function verdictHint(verdict) {
   const bits = [];
   if (verdict.skills.length) bits.push(`load these skills with use_skill before you start: ${verdict.skills.join(', ')}`);
   if (verdict.agents.length) bits.push(`delegate the matching work to these helper agents with the delegate tool: ${verdict.agents.join(', ')}`);
-  return bits.length ? `The council of brains voted on how to handle the user's last message. Follow their decision: ${bits.join('; and ')}.` : '';
+  return bits.length ? `The council of brains voted on how to handle the user's last message. Follow their decision exactly: ${bits.join('; and ')}. Do not answer from your own knowledge for the parts they assigned to skills or helper agents; call the tool first, then write the answer from its result.` : '';
 }
 
 module.exports = { createBrains, personaText, askJson, deliberate, tally, verdictHint, voterSystem, BUILTIN, MAX_VOTERS };
