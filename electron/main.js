@@ -1185,7 +1185,9 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 // ---------- IPC handlers that touch main's mutable state (kept here) ----------
 ipcMain.handle('browser:bounds', (_e, r) => {
   if (!r || ![r.x, r.y, r.width, r.height].every(Number.isFinite)) return false;
-  browserRect = { x: Math.max(0, Math.round(r.x)), y: Math.max(0, Math.round(r.y)), width: Math.max(50, Math.round(r.width)), height: Math.max(50, Math.round(r.height)) };
+  // The renderer measures in CSS pixels; the native view is placed in window units. They differ whenever the page is zoomed (⌘+ / ⌘-).
+  let z = 1; try { z = _e.sender.getZoomFactor() || 1; } catch {}
+  browserRect = { x: Math.max(0, Math.round(r.x * z)), y: Math.max(0, Math.round(r.y * z)), width: Math.max(50, Math.round(r.width * z)), height: Math.max(50, Math.round(r.height * z)) };
   if (browserView) browserView.setBounds(browserRect);
   return true;
 });
