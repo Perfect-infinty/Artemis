@@ -2,7 +2,7 @@ const assert = require('assert'); const fs = require('fs'); const os = require('
 const { createSkills, parseSkill, slugOf } = require('../electron/skills.js');
 const cs = require('../electron/chatsearch.js');
 const tools = require('../electron/tools.js');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ares-skills-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-skills-'));
 let disabled = []; let notified = 0;
 const sk = createSkills({ userDir: path.join(tmp, 'skills'), getDisabled: () => disabled, setDisabled: (l) => { disabled = l; }, notify: () => { notified++; } });
 assert.strictEqual(slugOf('Weekly Report!!'), 'weekly-report');
@@ -26,7 +26,7 @@ sk.setEnabled('Weekly report', true, null);
 // project skills
 const proj = path.join(tmp, 'proj'); fs.mkdirSync(proj);
 r = sk.save({ name: 'Deploy', description: 'Deploy the site', body: 'run deploy.sh', scope: 'project' }, proj);
-assert.ok(r.ok && r.source === 'project' && fs.existsSync(path.join(proj, '.ares', 'skills', 'deploy', 'SKILL.md')));
+assert.ok(r.ok && r.source === 'project' && fs.existsSync(path.join(proj, '.artemis', 'skills', 'deploy', 'SKILL.md')));
 assert.strictEqual(sk.list(null).length, 1); assert.strictEqual(sk.list(proj).length, 2);
 // import folder and file
 const ext = path.join(tmp, 'ext', 'my-skill'); fs.mkdirSync(path.join(ext, 'scripts'), { recursive: true });

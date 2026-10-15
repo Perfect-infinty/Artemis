@@ -585,7 +585,7 @@ export default function App() {
     applyTheme(settings.theme, themeChoices);
   }, [settings?.theme, settings?.activeProjectId, themeChoices]);
 
-  // Themes are JSON: main reads <userData>/themes and <project>/.ares/themes, we inject them and repaint.
+  // Themes are JSON: main reads <userData>/themes and <project>/.artemis/themes, we inject them and repaint.
   useEffect(() => {
     let alive = true;
     const run = async () => {

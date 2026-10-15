@@ -4,7 +4,7 @@ release
 .env
 .env.*
 .DS_Store
-.ares/
+.artemis/
 .rename-backup/
 .piper-voices/
 *.log

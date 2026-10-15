@@ -13,7 +13,7 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
 const call = (id, name, args) => delta({ tool_calls: [{ index: 0, id, function: { name, arguments: JSON.stringify(args) } }] });
 
 (async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ares-agents-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-agents-'));
   // ---- definitions
   const reg = sa.createAgents({ userDir: path.join(tmp, 'agents') });
   assert.deepStrictEqual(reg.list(null).map((a) => a.name), ['Athena', 'Calliope', 'Hephaestus', 'Themis']);

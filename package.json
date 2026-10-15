@@ -11,6 +11,7 @@
     "build": "vite build",
     "start": "npm run build && electron .",
     "dist": "npm run build && electron-builder",
+    "migrate:ares": "node scripts/migrate-ares-to-artemis.js",
     "test": "node scripts/test-artemis-tools.js && node scripts/test-tools.js && node scripts/test-agent.js && node scripts/test-extra.js && node scripts/test-mcp.js && node scripts/test-main.js && node scripts/test-control.js && node scripts/test-media.js && node scripts/test-import.js && node scripts/test-files.js && node scripts/test-sheet.js && node scripts/test-formula.js && node scripts/test-compact.js && node scripts/test-themes.js && node scripts/test-limits.js && node scripts/test-scheduler.js && node scripts/test-permissions.js && node scripts/test-providers.js && node scripts/test-amount.js && node scripts/test-skills.js && node scripts/test-skillhub.js && node scripts/test-learn.js && node scripts/test-make.js && node scripts/test-autolink.js && node scripts/test-subagents.js && node scripts/test-sentinel.js && node scripts/test-sentinel-commands.js && node scripts/test-tghtml.js && node scripts/test-terminal.js && node scripts/test-notes.js && node scripts/test-claude-usage.js && node scripts/test-personality.js && node scripts/test-brains.js && node scripts/test-think.js",
     "selftest:computer": "node scripts/computer-selftest.js"
   },

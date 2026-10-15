@@ -56,3 +56,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Artemis c
 ## License
 
 [MIT](LICENSE) © 2026 Orbix Labs
+
+## Upgrading from Ares
+
+Earlier builds were called Ares and kept data in `~/.ares`, `Documents/Ares Notes` and `<project>/.ares`. Quit the app, then run:
+
+```bash
+pnpm migrate:ares            # dry run, prints what it would do
+pnpm migrate:ares -- --apply # moves everything to the Artemis names
+```

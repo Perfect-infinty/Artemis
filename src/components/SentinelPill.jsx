@@ -39,7 +39,7 @@ export default function SentinelPill({ state, info, err, heard, said, onStop, on
       {state !== 'off' && state !== 'loading' && (heard || said) && (
         <div className="sn-talk" ref={talk}>
           {heard && <p className="you" title={heard}><b>You</b><span>{heard}</span></p>}
-          {said ? <p className="ares" title={said}><b>Artemis</b><span>{said}</span></p> : (heard && state === 'thinking' ? <p className="ares dim"><b>Artemis</b><span>…</span></p> : null)}
+          {said ? <p className="artemis" title={said}><b>Artemis</b><span>{said}</span></p> : (heard && state === 'thinking' ? <p className="artemis dim"><b>Artemis</b><span>…</span></p> : null)}
         </div>
       )}
       {err && (

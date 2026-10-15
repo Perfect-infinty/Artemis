@@ -1,5 +1,5 @@
 // Role agents ("Researcher", "Coder", ...): markdown files with frontmatter, like skills.
-// User agents live in <userData>/agents/<slug>.md, project agents in <project folder>/.ares/agents/<slug>.md.
+// User agents live in <userData>/agents/<slug>.md, project agents in <project folder>/.artemis/agents/<slug>.md.
 // Built-in roles are used when no file with the same slug exists; saving a role writes a file that overrides it.
 const fs = require('fs');
 const path = require('path');
@@ -69,7 +69,7 @@ const toolNames = (groups) => new Set((groups || []).flatMap((g) => GROUPS[g] ||
 
 /** deps: { userDir } */
 function createAgents(deps) {
-  const dirs = (root) => [['user', deps.userDir], ...(root ? [['project', path.join(root, '.ares', 'agents')]] : [])];
+  const dirs = (root) => [['user', deps.userDir], ...(root ? [['project', path.join(root, '.artemis', 'agents')]] : [])];
 
   function fromFile(source, base, file) {
     let text; try { text = fs.readFileSync(path.join(base, file), 'utf8'); } catch { return null; }
@@ -114,7 +114,7 @@ function createAgents(deps) {
     if (!body) return { ok: false, error: 'Write instructions for the agent.' };
     if (body.length > MAX_BODY) return { ok: false, error: `Instructions are too long (max ${MAX_BODY} characters).` };
     const scope = a.scope === 'project' && root ? 'project' : 'user';
-    const base = scope === 'project' ? path.join(root, '.ares', 'agents') : deps.userDir;
+    const base = scope === 'project' ? path.join(root, '.artemis', 'agents') : deps.userDir;
     fs.mkdirSync(base, { recursive: true });
     const tools = (Array.isArray(a.tools) ? a.tools : parseTools(a.tools)).filter((g) => GROUPS[g]);
     fs.writeFileSync(path.join(base, slug + '.md'), render({ name, role: oneLine(a.role).slice(0, 40), description: a.description, model: a.model, tools, body }), 'utf8');

@@ -1,6 +1,6 @@
 // Appearance themes as plain JSON, so a palette can be added or tweaked without rebuilding the app.
-// Sources, later wins by id: built-in electron/themes -> <userData>/themes -> <project folder>/.ares/themes.
-// A file looks like { "id": "ares", "name": "Ares", "group": "Gods", "dark": true,
+// Sources, later wins by id: built-in electron/themes -> <userData>/themes -> <project folder>/.artemis/themes.
+// A file looks like { "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true,
 //   "preview": ["#130808", "#c9923a", "#8c1c1c"], "vars": { "--bg": "#130808", ... } }.
 // "system" is reserved: it follows the OS and has no palette of its own.
 const fs = require('fs');

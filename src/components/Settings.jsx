@@ -29,7 +29,7 @@ export function SettingsModal({ settings, groups = [], projects = [], providers 
   const [s, setS] = useState({ ...settings });
   const set = (k) => (e) => setS({ ...s, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
   const chatGroups = groups;
-  // Themes come from main: built-in JSON plus <userData>/themes and <project>/.ares/themes, refreshed here.
+  // Themes come from main: built-in JSON plus <userData>/themes and <project>/.artemis/themes, refreshed here.
   const projectFolder = (projects.find((p) => p.id === (settings.activeProjectId || (settings.projectId || ''))) || {}).folder || (projects[0] || {}).folder || '';
   const [themeInfo, setThemeInfo] = useState({ themes: [], folder: '' });
   const [themeMsg, setThemeMsg] = useState('');
@@ -90,7 +90,7 @@ export function SettingsModal({ settings, groups = [], projects = [], providers 
                   <button type="button" onClick={importThemes} disabled={themeBusy}>Import .json</button>
                   <span className="hint">{themeMsg || `${themeList.length} themes · ${themeInfo.folder || ''}`}</span>
                 </div>
-                <div className="hint">Drop a theme .json in that folder and press Refresh — no rebuild. A file is <code>{'{ "id": "ares", "name": "Ares", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. The project’s .ares/themes wins over the user folder.</div>
+                <div className="hint">Drop a theme .json in that folder and press Refresh — no rebuild. A file is <code>{'{ "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. The project’s .artemis/themes wins over the user folder.</div>
               </div>
               <Field label="Text size" hint="Size of the text across the whole app.">
                 <Select value={s.textSize || 'medium'} onChange={(e) => { setS({ ...s, textSize: e.target.value }); onApply({ textSize: e.target.value }); }}>{TEXT_SIZES.map(([id, n, px]) => <option key={id} value={id}>{n} ({px}px)</option>)}</Select>

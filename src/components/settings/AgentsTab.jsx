@@ -64,7 +64,7 @@ export function AgentsTab({ s, set, chatGroups, showToggles = true }) {
         ))}
       </div>
       <div className="actions-row"><button onClick={() => setEd({ ...AGENT_BLANK })}>+ New agent</button><button onClick={() => api.agentsReveal()}>Open agents folder</button></div>
-      <small className="hint">Agents are plain .md files (name, description, model, tools, then instructions), like skills. Per-project agents go in &lt;project&gt;/.ares/agents/.</small>
+      <small className="hint">Agents are plain .md files (name, description, model, tools, then instructions), like skills. Per-project agents go in &lt;project&gt;/.artemis/agents/.</small>
     </>
   );
 }

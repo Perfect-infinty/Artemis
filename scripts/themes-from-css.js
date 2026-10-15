@@ -1,5 +1,5 @@
 // One-off maintenance helper: turns the palettes in src/styles.css into theme JSON files.
-// Run with: node scripts/themes-from-css.js   (writes electron/themes and .ares/themes)
+// Run with: node scripts/themes-from-css.js   (writes electron/themes and .artemis/themes)
 const fs = require('fs');
 const path = require('path');
 
@@ -9,7 +9,7 @@ const css = fs.readFileSync(cssPath, 'utf8');
 
 // names and groups: keep the list from an older src/lib/themes.js when there is one, otherwise derive
 const NAMES = { 'notion-dark': 'Notion Dark' };
-const GROUPS = { system: 'Basic', light: 'Basic', dark: 'Basic', notion: 'Basic', 'notion-dark': 'Basic', ares: 'Gods', artemis: 'Gods', hermes: 'Gods' };
+const GROUPS = { system: 'Basic', light: 'Basic', dark: 'Basic', notion: 'Basic', 'notion-dark': 'Basic', artemis: 'Gods', hermes: 'Gods' };
 const titleOf = (id) => NAMES[id] || id.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 const info = {};
 try {
@@ -46,7 +46,7 @@ for (const m of css.matchAll(/:root\[data-theme="([^"]+)"\] \{([^}]*)\}/g)) {
 // which palettes are dark: anything that is not the two light ones (the CSS color-scheme line is
 // dropped from the vars on purpose, the renderer sets documentElement.style.colorScheme instead)
 const LIGHT_IDS = new Set(['light', 'notion']);
-const targets = [path.join(root, 'electron', 'themes'), path.join(root, '.ares', 'themes')];
+const targets = [path.join(root, 'electron', 'themes'), path.join(root, '.artemis', 'themes')];
 let written = 0;
 for (const [id, vars] of Object.entries(themes)) {
   const m = info[id] || { name: NAMES[id] || titleOf(id), group: GROUPS[id] || 'My themes' };

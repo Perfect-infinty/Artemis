@@ -11,7 +11,7 @@ const { createSentinelWidget } = require('./sentinel-widget');
 const { createLogger } = require('./logger');
 // ---------- app log (file + Logs page) ----------
 const logger = createLogger({
-  dir: path.join(app.getPath('home'), '.ares', 'logs'),
+  dir: path.join(app.getPath('home'), '.artemis', 'logs'),
   onEntry: (e) => { try { win?.webContents.send('log:entry', e); } catch {} },
   onProgress: (list) => { try { win?.webContents.send('log:progress', list); } catch {} }
 });
@@ -218,7 +218,7 @@ const openProjectFolder = () => {
 };
 const themeDirs = (folderArg) => {
   const folder = typeof folderArg === 'string' && folderArg ? folderArg : openProjectFolder();
-  return { user: path.join(app.getPath('userData'), 'themes'), project: folder ? path.join(folder, '.ares', 'themes') : undefined };
+  return { user: path.join(app.getPath('userData'), 'themes'), project: folder ? path.join(folder, '.artemis', 'themes') : undefined };
 };
 /** Settings reads the themes: the folder of project "latest", or the project the renderer names. */
 const listThemes = (folderArg) => { const d = themeDirs(folderArg); return { ...themes.list(d), folders: { user: d.user, project: d.project || null } }; };
@@ -330,8 +330,8 @@ ipcMain.handle('claude:usage', (_e, o) => claudeUsage({ force: !!(o && o.force) 
 const skillRoot = (rootArg) => (rootArg && fs.existsSync(rootArg) ? rootArg : null);
 // ---------- IPC: themes ----------
 
-// ---------- IPC: profile (about you + avatar in ~/.ares/user/images) ----------
-const profileDir = () => path.join(app.getPath('home'), '.ares', 'user');
+// ---------- IPC: profile (about you + avatar in ~/.artemis/user/images) ----------
+const profileDir = () => path.join(app.getPath('home'), '.artemis', 'user');
 const avatarFile = (ext = 'png') => path.join(profileDir(), 'images', `avatar.${ext}`);
 function avatarData() {
   for (const [ext, mime] of [['gif', 'image/gif'], ['png', 'image/png']]) {
@@ -341,8 +341,8 @@ function avatarData() {
 }
 
 // ---------- IPC: agents ----------
-// Project logo: processed here, saved in <project folder>/.ares/ (or ~/.ares/project-logos) and returned as a data URL kept on the project.
-const logoDir = (folder) => (folder && fs.existsSync(folder) ? path.join(folder, '.ares') : path.join(os.homedir(), '.ares', 'project-logos'));
+// Project logo: processed here, saved in <project folder>/.artemis/ (or ~/.artemis/project-logos) and returned as a data URL kept on the project.
+const logoDir = (folder) => (folder && fs.existsSync(folder) ? path.join(folder, '.artemis') : path.join(os.homedir(), '.artemis', 'project-logos'));
 
 // ---------- IPC: folders / files ----------
 
@@ -501,7 +501,7 @@ async function transcribeAudio({ audio, mime, language, hint } = {}) {
 const SENTINEL_MODEL_URLS = [
   'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz'
 ];
-const sentinelFile = () => path.join(app.getPath('home'), '.ares', 'models', 'vosk-small-en.tar.gz');
+const sentinelFile = () => path.join(app.getPath('home'), '.artemis', 'models', 'vosk-small-en.tar.gz');
 const sentinelReady = () => { try { return fs.statSync(sentinelFile()).size > 5 * 1024 * 1024; } catch { return false; } };
 let sentinelBusy = false;
 

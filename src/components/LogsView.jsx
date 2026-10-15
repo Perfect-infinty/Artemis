@@ -90,7 +90,7 @@ export default function LogsView() {
           </div>
         ))}
       </div>
-      <div className="logs-foot muted small">{shown.length} of {entries.length} entries · saved to {file || '~/.ares/logs'} (kept 14 days, keys and tokens are masked){!follow && <> · <button className="link" onClick={() => setFollow(true)}>Jump to latest</button></>}</div>
+      <div className="logs-foot muted small">{shown.length} of {entries.length} entries · saved to {file || '~/.artemis/logs'} (kept 14 days, keys and tokens are masked){!follow && <> · <button className="link" onClick={() => setFollow(true)}>Jump to latest</button></>}</div>
     </div>
   );
 }

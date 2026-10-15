@@ -1,5 +1,5 @@
 // Appearance themes. The palettes live in JSON files (electron/themes built in, plus <userData>/themes
-// and <project>/.ares/themes), so a new theme never needs a rebuild: main reads them and hands the list
+// and <project>/.artemis/themes), so a new theme never needs a rebuild: main reads them and hands the list
 // to the renderer, drop a .json in the folder and press Refresh in Settings.
 // Light/Dark stay in styles.css (they carry the @media (prefers-color-scheme: dark) fallback).
 export const SYSTEM_THEME = { id: 'system', name: 'System', group: 'Basic', preview: ['#faf9f5', '#c96442', '#262624'] };

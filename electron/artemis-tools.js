@@ -3,7 +3,7 @@
 // Anything that can run commands or write the user's notes asks the user first, in a native dialog.
 // Permissions that widen what Artemis may do (terminal, computer control, auto-approve, phone, keys, endpoints) can NOT be changed from here.
 
-// Themes are JSON now (electron/themes, <userData>/themes, <project>/.ares/themes): the live list comes from
+// Themes are JSON now (electron/themes, <userData>/themes, <project>/.artemis/themes): the live list comes from
 // the themes() callback main passes in, this constant is only the fallback when that is missing.
 const THEME_IDS = ['system', 'light', 'dark'];
 

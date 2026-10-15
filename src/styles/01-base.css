@@ -22,7 +22,7 @@
   color-scheme: dark;
 }
 
-/* Themes live in JSON (electron/themes plus <userData>/themes and <project>/.ares/themes) and the renderer
+/* Themes live in JSON (electron/themes plus <userData>/themes and <project>/.artemis/themes) and the renderer
    injects one --theme-<id>-<name> variable per palette from that file, so adding a theme needs no rebuild.
    This rule points the app variables at the chosen palette. Light and Dark stay below: they carry the OS
    colour-scheme fallback. Note a var() with no value makes a property invalid, hence [data-vars]. */

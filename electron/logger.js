@@ -1,4 +1,4 @@
-// App log: everything important is written to ~/.ares/logs/ares-YYYY-MM-DD.log and kept in memory for the Logs page.
+// App log: everything important is written to ~/.artemis/logs/artemis-YYYY-MM-DD.log and kept in memory for the Logs page.
 // Secrets (keys, tokens, bearer headers) are masked before anything is stored.
 const fs = require('fs');
 const path = require('path');
@@ -34,11 +34,11 @@ function createLogger({ dir, onEntry, onProgress, max = 1500 }) {
   const tasks = new Map(); // id -> { id, label, pct, state, detail, since, updated }
   let writable = true;
 
-  const fileFor = (d = new Date()) => path.join(dir, `ares-${d.toISOString().slice(0, 10)}.log`);
+  const fileFor = (d = new Date()) => path.join(dir, `artemis-${d.toISOString().slice(0, 10)}.log`);
   try {
     fs.mkdirSync(dir, { recursive: true });
     const cutoff = Date.now() - KEEP_DAYS * 86400000;
-    for (const f of fs.readdirSync(dir)) { if (/^ares-.*\.log$/.test(f)) { try { if (fs.statSync(path.join(dir, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, f)); } catch {} } }
+    for (const f of fs.readdirSync(dir)) { if (/^artemis-.*\.log$/.test(f)) { try { if (fs.statSync(path.join(dir, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, f)); } catch {} } }
   } catch { writable = false; }
 
   function log(level, source, message, data) {

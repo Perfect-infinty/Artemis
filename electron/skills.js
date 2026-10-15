@@ -1,5 +1,5 @@
 // Skills: folders with a SKILL.md (frontmatter: name, description; body: instructions), same layout as agentskills.io / Claude skills.
-// User skills live in <userData>/skills/<slug>/, project skills in <project folder>/.ares/skills/<slug>/.
+// User skills live in <userData>/skills/<slug>/, project skills in <project folder>/.artemis/skills/<slug>/.
 const fs = require('fs');
 const path = require('path');
 
@@ -35,7 +35,7 @@ function render({ name, description, body, createdBy, created, updated }) {
 
 /** deps: { userDir, getDisabled(): string[], setDisabled(list), notify?() } */
 function createSkills(deps) {
-  const dirs = (root) => [['user', deps.userDir], ...(root ? [['project', path.join(root, '.ares', 'skills')]] : [])];
+  const dirs = (root) => [['user', deps.userDir], ...(root ? [['project', path.join(root, '.artemis', 'skills')]] : [])];
 
   function scan(root) {
     const out = [];
@@ -94,7 +94,7 @@ function createSkills(deps) {
     if (mode === 'create' && existing) return { ok: false, error: `A skill named "${existing.name}" already exists. Use update_skill to change it.` };
     if (mode === 'update' && !existing) return { ok: false, error: `No skill named "${name}". Use create_skill first.` };
     const useProject = existing ? existing.source === 'project' : scope === 'project' && !!root;
-    const base = useProject ? path.join(root, '.ares', 'skills') : deps.userDir;
+    const base = useProject ? path.join(root, '.artemis', 'skills') : deps.userDir;
     const dir = existing ? existing.dir : path.join(base, slug);
     const file = path.join(dir, 'SKILL.md');
     let prev = {};

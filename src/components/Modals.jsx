@@ -181,7 +181,7 @@ export function ProjectModal({ project, onSave, onDelete, onClose }) {
   return (
     <Modal title={project ? 'Project settings' : 'New project'} onClose={onClose}>
       <Field label="Project name"><input autoFocus value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} /></Field>
-      <Field label="Project logo" hint={logoErr || "Shown in the sidebar. Saved in the project's .ares folder."}>
+      <Field label="Project logo" hint={logoErr || "Shown in the sidebar. Saved in the project's .artemis folder."}>
         <div className="mem-add">
           <ProjectLogo logo={p.logo} size={32} />
           <button onClick={pickLogo}>Choose…</button>
@@ -563,8 +563,8 @@ export function ProfileModal({ settings, avatar, onAvatar, onSave, onClose }) {
         <input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="City, country" />
       </Field>
       <Field label="About you">
-        <textarea rows={7} value={about} onChange={(e) => setAbout(e.target.value)} placeholder={'Your role, what you work on, the languages you use, how you like answers (short, direct, ...).\nAres reads this in every chat.'} />
-        <small>Saved on this computer only. Your picture (GIFs work too) is stored in ~/.ares/user/images. Leave empty to share nothing.</small>
+        <textarea rows={7} value={about} onChange={(e) => setAbout(e.target.value)} placeholder={'Your role, what you work on, the languages you use, how you like answers (short, direct, ...).\nArtemis reads this in every chat.'} />
+        <small>Saved on this computer only. Your picture (GIFs work too) is stored in ~/.artemis/user/images. Leave empty to share nothing.</small>
       </Field>
       {err && <small className="hint err">{err}</small>}
       <div className="actions-row"><span style={{ flex: 1 }} /><button onClick={onClose}>Cancel</button><button className="primary" onClick={() => onSave({ profileName: name.trim(), profileAbout: about.trim(), profileLocation: place.trim() })}>Save</button></div>

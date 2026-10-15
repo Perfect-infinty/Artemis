@@ -38,18 +38,18 @@ export default function Sidebar({
 }) {
   const [q, setQ] = useState('');
   const navRef = useRef(null);
-  const [navH, setNavH] = useState(() => { try { const v = parseInt(localStorage.getItem('ares-nav-h'), 10); return v > 60 ? v : null; } catch { return null; } });
+  const [navH, setNavH] = useState(() => { try { const v = parseInt(localStorage.getItem('artemis-nav-h') || localStorage.getItem('ares-nav-h'), 10); return v > 60 ? v : null; } catch { return null; } });
   const startSplit = (e) => {
     e.preventDefault();
     const y0 = e.clientY, h0 = navRef.current ? navRef.current.offsetHeight : 200;
     const max = () => Math.max(100, (navRef.current?.closest('.sidebar')?.clientHeight || 700) - 230);
     let cur = h0;
     const mv = (ev) => { cur = Math.round(Math.max(60, Math.min(max(), h0 + ev.clientY - y0))); setNavH(cur); };
-    const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); document.body.style.cursor = ''; try { localStorage.setItem('ares-nav-h', String(cur)); } catch {} };
+    const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); document.body.style.cursor = ''; try { localStorage.setItem('artemis-nav-h', String(cur)); } catch {} };
     document.body.style.cursor = 'row-resize';
     window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
   };
-  const resetSplit = () => { setNavH(null); try { localStorage.removeItem('ares-nav-h'); } catch {} };
+  const resetSplit = () => { setNavH(null); try { { localStorage.removeItem('artemis-nav-h'); localStorage.removeItem('ares-nav-h'); }; } catch {} };
   const [more, setMore] = useState(() => { try { return localStorage.getItem('zero-more') === '1'; } catch { return false; } });
   const toggleMore = () => setMore((m) => { try { localStorage.setItem('zero-more', m ? '0' : '1'); } catch {} return !m; });
   const [openProjects, setOpenProjects] = useState(() => {
