@@ -32,6 +32,16 @@ function ChatRow({ c, active, status, inProject, onSelect, onDelete, onRename, o
   );
 }
 
+/** Collapsible section header used by Pinned projects, Pinned chats and Projects (Notes has its own, same look). */
+function SideHead({ label, open, onToggle }) {
+  return (
+    <div className="side-head" onClick={onToggle}>
+      <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export default function Sidebar({
   chats, projects = [], currentId, view, statusOf, onNewChat, onNewIncognito, onSelect, onDelete, onRename, onPinChat, onPinProject, onOpenProject,
   onProjects, onConnectors, onSettings, onMemory, onUsage, onBrowser, onTerminal, notes, onSchedule, onSkills, onAgents, onAutomations, onSentinel, sentinel = 'off', onLogs, agentCount = 0, onPermissions, onProfile, profile = {}, view_, memoryCount, connectorCount, hidden, onResizeStart
@@ -69,7 +79,10 @@ export default function Sidebar({
       return next;
     });
   }, [projects.length]);
+  const [shut, setShut] = useState(() => { try { return JSON.parse(localStorage.getItem('artemis-side-shut') || '{}'); } catch { return {}; } });
+  const toggleSec = (k) => setShut((old) => { const next = { ...old, [k]: !old[k] }; try { localStorage.setItem('artemis-side-shut', JSON.stringify(next)); } catch {} return next; });
   const ql = q.trim().toLowerCase();
+  const secOpen = (k) => !!ql || !shut[k]; // searching always shows everything
   const visible = chats
     .filter((c) => !ql || c.title.toLowerCase().includes(ql) ||
       c.messages.some((m) => (m.content || '').toLowerCase().includes(ql) || (m.steps || []).some((s) => (s.text || '').toLowerCase().includes(ql))))
@@ -79,8 +92,8 @@ export default function Sidebar({
   const pinnedChats = visible.filter((c) => c.pinned);
   const pinnedProjects = ql ? [] : projects.filter((p) => p.pinned);
   if (pinnedProjects.length) {
-    rows.push(<div key="pinned-projects" className="group-label">Pinned projects</div>);
-    for (const p of pinnedProjects) {
+    rows.push(<SideHead key="pinned-projects" label="Pinned projects" open={secOpen('pinnedProjects')} onToggle={() => toggleSec('pinnedProjects')} />);
+    for (const p of secOpen('pinnedProjects') ? pinnedProjects : []) {
       rows.push(
         <div key={'p' + p.id} className="chat-item" data-project={p.id} onClick={() => onOpenProject(p.id)}>
           <ProjectLogo logo={p.logo} size={15} />
@@ -91,8 +104,8 @@ export default function Sidebar({
     }
   }
   if (pinnedChats.length) {
-    rows.push(<div key="pinned" className="group-label">Pinned chats</div>);
-    for (const c of pinnedChats) {
+    rows.push(<SideHead key="pinned" label="Pinned chats" open={secOpen('pinnedChats')} onToggle={() => toggleSec('pinnedChats')} />);
+    for (const c of secOpen('pinnedChats') ? pinnedChats : []) {
       rows.push(
         <ChatRow key={c.id} c={c} active={view === 'chat' && c.id === currentId} status={statusOf(c)} inProject={!!c.projectId}
           onSelect={onSelect} onDelete={onDelete} onRename={onRename} onPin={onPinChat} />
@@ -101,9 +114,13 @@ export default function Sidebar({
   }
   const unassigned = visible.filter((x) => !x.pinned && !x.projectId);
   const projectList = projects.filter((p) => visible.some((c) => !c.pinned && c.projectId === p.id));
-  for (const p of projectList) {
+  if (projectList.length) {
+    rows.push(<SideHead key="projects-head" label="Projects" open={secOpen('projects')} onToggle={() => toggleSec('projects')} />);
+  }
+  for (const p of secOpen('projects') ? projectList : []) {
     const items = visible.filter((c) => !c.pinned && c.projectId === p.id);
     const isOpen = ql || openProjects[p.id] !== false;
+
     rows.push(
       <div key={'pg' + p.id} className={`project-group ${isOpen ? 'open' : 'closed'}`}>
         <div className="project-group-head" data-project={p.id} onClick={() => toggleProject(p.id)}>

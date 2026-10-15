@@ -10,21 +10,7 @@
 .nav-more { gap: 2px; margin: 2px 0 4px; }
 .nav-item.sub { padding-left: 10px; height: 32px; }
 .chat-list { margin-top: 6px; gap: 1px; padding-right: 2px; }
-.group-label { padding: 14px 10px 4px; line-height: 1.2; }
-.chat-list > .group-label:first-child { padding-top: 6px; }
-.chat-item { min-height: 32px; padding: 0 10px; gap: 10px; }
-.chat-item > svg.row-icon { width: 16px; height: 16px; flex: none; }
-.project-group { margin: 6px 0 2px; }
-.project-group-head { min-height: 32px; padding: 0 10px; gap: 8px; font-weight: 500; font-size: var(--fs, 14px); }
-.project-group-head .project-chevron { width: 14px; height: 14px; margin-right: -2px; }
-.project-group-head .row-icon { width: 16px; height: 16px; flex: none; }
-.project-submenu { margin-left: 17px; padding-left: 6px; gap: 1px; }
-.project-submenu .chat-item { min-height: 30px; padding: 0 8px; }
 .side-foot { margin-top: 6px; padding: 10px 2px 0; }
-.chat-item { gap: 12px; }
-.chat-item > svg.row-icon { width: 18px; height: 18px; margin: 0 1px; }
-.project-submenu .chat-item { gap: 10px; }
-.project-submenu .chat-item > svg.row-icon { width: 16px; height: 16px; margin: 0; }
 
 /* ---- custom dropdown (replaces every native <select>) ---- */
 .sel { display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }

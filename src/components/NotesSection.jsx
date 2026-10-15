@@ -71,7 +71,7 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
 
   return (
     <div className="notes-sec">
-      <div className="group-label notes-head" onClick={() => setOpen((o) => !o)}>
+      <div className="side-head notes-head" onClick={() => setOpen((o) => !o)}>
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         <span className="notes-head-t">Notes</span>
         <span style={{ flex: 1 }} />
