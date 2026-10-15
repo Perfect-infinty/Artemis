@@ -44,7 +44,7 @@ function SideHead({ label, open, onToggle }) {
 
 export default function Sidebar({
   chats, projects = [], currentId, view, statusOf, onNewChat, onNewIncognito, onSelect, onDelete, onRename, onPinChat, onPinProject, onOpenProject,
-  onProjects, onConnectors, onSettings, onMemory, onUsage, onBrowser, onTerminal, notes, onSchedule, onSkills, onAgents, onAutomations, onSentinel, sentinel = 'off', onLogs, agentCount = 0, onPermissions, onProfile, profile = {}, view_, memoryCount, connectorCount, hidden, onResizeStart
+  onHome, onProjects, onConnectors, onSettings, onMemory, onUsage, onBrowser, onTerminal, notes, onSchedule, onSkills, onAgents, onAutomations, onSentinel, sentinel = 'off', onLogs, agentCount = 0, onPermissions, onProfile, profile = {}, view_, memoryCount, connectorCount, hidden, onResizeStart
 }) {
   const [q, setQ] = useState('');
   const navRef = useRef(null);
@@ -150,6 +150,7 @@ export default function Sidebar({
       <div className="drag" style={{ height: mac ? 34 : 6 }} />
       <div className="side-search"><Icon name="search" size={16} /><input type="search" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} /></div>
       <nav className="side-nav" ref={navRef} style={navH ? { height: navH, maxHeight: 'none', flex: 'none' } : undefined}>
+        <button className="nav-item" data-nav="home" onClick={onHome}><Icon name="home" size={18} /> Home</button>
         <button className="nav-item" onClick={onNewChat}><span className="nav-ico new"><Icon name="plus" size={15} /></span> New</button>
         {onSentinel && (
           <button className={`nav-item sn-nav ${sentinel !== 'off' ? 'on' : ''}`} onClick={onSentinel} title={sentinel === 'off' ? 'Start Sentinel: talk to Artemis hands-free (⇧⌘A)' : 'Turn Sentinel off (⇧⌘A)'}>

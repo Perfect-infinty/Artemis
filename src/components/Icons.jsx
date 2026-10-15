@@ -42,6 +42,7 @@ const SHAPES = {
   warning: P('M12 3l10 18H2zM12 10v5M12 18h.01'),
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h8" /></>,
   refresh: P('M20 11a8 8 0 0 0-14-4L4 9M4 4v5h5M4 13a8 8 0 0 0 14 4l2-2M20 20v-5h-5'),
+  home: P('M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10'),
   chat: P('M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.5A8 8 0 1 1 21 12z'),
   chevronRight: P('M9 6l6 6-6 6'),
   chevronDown: P('M6 9l6 6 6-6'),

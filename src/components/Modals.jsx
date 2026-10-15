@@ -1,18 +1,29 @@
 import { costOf, fmtUsd } from '../lib/cost.js';
 import Select from './Select.jsx';
 import { askConfirm } from '../lib/dialog.js';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useContext } from 'react';
+import { PageContext } from '../lib/pageContext.js';
 import { splitSheets } from '../lib/preview.js';
 import { Icon } from './Icons.jsx';
 import ProjectLogo from './ProjectLogo.jsx';
 import { ClaudeUsageFor } from './ClaudeUsage.jsx';
 
 export function Modal({ title, onClose, children, wide, cls, bare }) {
+  const page = useContext(PageContext);
   useEffect(() => {
+    if (page) return undefined; // a page is closed with its tab, not with Escape
     const h = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [onClose]);
+  }, [onClose, page]);
+  if (page) {
+    return (
+      <div className={`modal page ${wide ? 'wide' : ''} ${cls || ''}`}>
+        {!bare && <h2>{title}</h2>}
+        {children}
+      </div>
+    );
+  }
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`modal ${wide ? 'wide' : ''} ${cls || ''}`}>

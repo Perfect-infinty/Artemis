@@ -17,20 +17,23 @@ export default function BrowserPanel({ url, onUrl, onClose, full = false }) {
   const [text, setText] = useState(url);
   useEffect(() => { setText(url); }, [url]);
 
-  // the native web view is laid over this empty box, so keep its bounds in sync
+  // The native web view is laid over this empty box. Its position can change without its size changing (sidebar, tabs, split view),
+  // so the box is measured every frame and the bounds are sent whenever they differ from the last ones sent.
   useEffect(() => {
-    const send = () => {
-      const el = body.current; if (!el) return;
-      const r = el.getBoundingClientRect();
-      api.browserBounds({ x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) });
+    let raf = 0; let last = '';
+    const tick = () => {
+      const el = body.current;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const b = { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+        const key = b.x + ',' + b.y + ',' + b.width + ',' + b.height;
+        if (key !== last) { last = key; api.browserBounds(b); }
+      }
+      raf = requestAnimationFrame(tick);
     };
-    send();
-    const ro = new ResizeObserver(send);
-    ro.observe(body.current);
-    window.addEventListener('resize', send);
-    const t = setTimeout(send, 60);
+    tick();
     const off = api.onBrowserUrl((u) => { onUrl(u); });
-    return () => { ro.disconnect(); window.removeEventListener('resize', send); clearTimeout(t); off?.(); };
+    return () => { cancelAnimationFrame(raf); off?.(); };
   }, []);
 
   const go = () => { const u = toUrl(text); if (u) { onUrl(u); api.browserNavigate(u); } };

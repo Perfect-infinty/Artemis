@@ -10,12 +10,14 @@ import SentinelPill from './components/SentinelPill.jsx';
 import { assistantText } from './lib/history.js';
 import BrowserPanel from './components/BrowserPanel.jsx';
 import { ChatPills } from './components/Composer.jsx';
+import { PageContext } from './lib/pageContext.js';
 import SplitPane from './components/SplitPane.jsx';
 import { observeBottom } from './lib/stick.js';
 import TabBar, { ContextMenu } from './components/TabBar.jsx';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import { ProjectsList, ProjectPage } from './components/ProjectsView.jsx';
+import HomeView from './components/HomeView.jsx';
 import { Icon } from './components/Icons.jsx';
 import Message from './components/Message.jsx';
 import Composer from './components/Composer.jsx';
@@ -71,13 +73,16 @@ export default function App() {
   const applyProviders = (r) => { setProviders(r.providers || []); setExtraPrices(r.prices || {}); };
   const [runningIds, setRunningIds] = useState([]); // chats with a run in progress
   const [connectorCount, setConnectorCount] = useState(0);
-  const [modal, setModal] = useState(null); // 'settings' | 'memory' | {project: id|'new'}
+  const [modal, setModalRaw] = useState(null); // {project: id|'new'}, 'permissions', 'profile'; Settings, Memory, Usage and Connectors are pages (see openPage)
+  const setModal = (m) => { if (typeof m === 'string' && TAB_MODALS.includes(m)) openPage(m); else setModalRaw(m); };
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [avatar, setAvatar] = useState(null);
   useEffect(() => installDropGuard(), []);
   useEffect(() => { window.api.profileGet().then((p) => setAvatar((p && p.avatar) || null)).catch(() => {}); }, []);
 
-  const [settingsTab, setSettingsTab] = useState('general');
+  const [settingsTab, setSettingsTabState] = useState('general');
+  const settingsTabRef = useRef('general');
+  const setSettingsTab = (t) => { settingsTabRef.current = t || 'general'; setSettingsTabState(t || 'general'); };
   const [panel, setPanel] = useState(null); // { type: 'file', file } | { type: 'artifact', id }
   const [showProgress, setShowProgress] = useState(() => { try { return localStorage.getItem('artemis-chatbar') !== '0'; } catch { return true; } }); // the right bar: chat controls + progress
   useEffect(() => { try { localStorage.setItem('artemis-chatbar', showProgress ? '1' : '0'); } catch {} }, [showProgress]);
@@ -124,7 +129,10 @@ export default function App() {
   // ---------- tabs ----------
   // A tab remembers what it shows: a page (chat, notes, terminal, browser, …), which chat, and an open Settings / Memory / Usage / Connectors window.
   // The live state (view, currentId, modal) always belongs to the active tab, and is copied back into it on every change.
-  const TAB_MODALS = ['settings', 'memory', 'usage', 'connectors'];
+  const TAB_MODALS = ['settings', 'memory', 'usage', 'connectors']; // these open as pages in a tab
+  const PAGE_VIEWS = ['home', 'browser', 'schedule', 'skills', 'logs', 'automations', 'agents'];
+  const SPLIT_KINDS = ['chat', 'note', ...TAB_MODALS, ...PAGE_VIEWS]; // anything in here can sit in the second half of a split view
+  const kindOf = (sn) => (sn.modal && TAB_MODALS.includes(sn.modal) ? sn.modal : sn.view);
   const [tabs, setTabs] = useState(null);
   const [activeTab, setActiveTab] = useState(null);
   const [ctx, setCtx] = useState(null);
@@ -139,17 +147,17 @@ export default function App() {
     const cid = chatsRef.current.some((c) => c.id === sn.chatId) ? sn.chatId : currentRef.current;
     stick.current = true;
     setNotePath(sn.view === 'note' ? sn.notePath || null : null);
-    setView(sn.view || 'chat'); setCurrentId(cid); setModal(sn.modal || null); setSettingsTab(sn.settingsTab || 'general');
+    setView(sn.view || 'chat'); setCurrentId(cid); setModalRaw(sn.modal || null); setSettingsTab(sn.settingsTab || 'general');
   };
   const mkTab = (sn, pinned) => ({ id: 't' + Date.now().toString(36) + (++tabSeq.current), pinned: !!pinned, s: sn });
   const openTab = (sn) => { const t = mkTab(sn); setTabs((ts) => [...(ts || []), t]); setActiveTab(t.id); applySnap(sn); return t; };
   const activateTab = (id) => {
     const t = (tabsRef.current || []).find((x) => x.id === id); if (!t || id === activeRef.current) return;
     const cur = (tabsRef.current || []).find((x) => x.id === activeRef.current);
-    setSplitTab((sp) => (sp === id ? (cur && (cur.s.view === 'chat' || cur.s.view === 'note') ? cur.id : null) : sp)); // clicking the other half swaps the halves
+    setSplitTab((sp) => (sp === id ? (cur && SPLIT_KINDS.includes(kindOf(cur.s)) ? cur.id : null) : sp)); // clicking the other half swaps the halves
     setActiveTab(id); applySnap(t.s);
   };
-  const splitWith = (id) => { const t = (tabsRef.current || []).find((x) => x.id === id); if (t && (t.s.view === 'chat' || t.s.view === 'note') && id !== activeRef.current) setSplitTab(id); };
+  const splitWith = (id) => { const t = (tabsRef.current || []).find((x) => x.id === id); if (t && SPLIT_KINDS.includes(kindOf(t.s)) && id !== activeRef.current) setSplitTab(id); };
   const splitChat = (chatId) => { // open a chat next to the current one
     if (chatId === currentRef.current) return;
     const ex = (tabsRef.current || []).find((t) => t.s.view === 'chat' && t.s.chatId === chatId);
@@ -181,7 +189,10 @@ export default function App() {
     const ts = tabsRef.current || []; const t = ts.find((x) => x.id === id);
     if (!t || t.pinned) return; // pinned tabs stay until they are unpinned
     const rest = ts.filter((x) => x.id !== id);
-    if (!rest.length) { const sn = chatSnap(); const nt = mkTab(sn); setTabs([nt]); setActiveTab(nt.id); applySnap(sn); return; }
+    if (!rest.length) { // closing the last tab lands on Home, not on a new chat
+      if (t.s.view === 'home' && !t.s.modal) return;
+      const sn = { view: 'home', chatId: currentRef.current, modal: null, settingsTab: 'general' }; const nt = mkTab(sn); setTabs([nt]); setActiveTab(nt.id); setSplitTab(null); applySnap(sn); return;
+    }
     setTabs(rest);
     if (id === activeRef.current) {
       const order = orderTabs(ts); const i = order.findIndex((x) => x.id === id);
@@ -195,6 +206,23 @@ export default function App() {
     if (!keep.some((x) => x.id === activeRef.current)) { const t = keep.find((x) => x.id === id) || keep[0]; setActiveTab(t.id); applySnap(t.s); }
   };
   const togglePin = (id) => setTabs((ts) => (ts || []).map((x) => (x.id === id ? { ...x, pinned: !x.pinned } : x)));
+  // Settings, Memory, Usage and Connectors are pages: one tab each, reused when it is already open
+  const openPage = (kind) => {
+    const now = tabsRef.current;
+    if (!now) { setModalRaw(kind); return; }
+    const want = kind === 'settings' ? settingsTabRef.current : 'general';
+    const ex = now.find((t) => t.s.modal === kind);
+    if (ex) {
+      if (kind === 'settings') { tabsRef.current = now.map((t) => (t.id === ex.id ? { ...t, s: { ...t.s, settingsTab: want } } : t)); setTabs(tabsRef.current); }
+      if (ex.id === activeRef.current) { setSettingsTabState(want); return; }
+      activateTab(ex.id); return;
+    }
+    openTab({ view: 'chat', chatId: currentRef.current, modal: kind, settingsTab: want });
+  };
+  const closePage = () => { // closing a page closes its tab
+    const id = activeRef.current; const t = (tabsRef.current || []).find((x) => x.id === id);
+    if (t && !t.pinned && t.s.modal && TAB_MODALS.includes(t.s.modal)) closeTab(id); else setModalRaw(null);
+  };
   const duplicateTab = (id) => { const t = (tabsRef.current || []).find((x) => x.id === id); if (t) openTab({ ...t.s }); };
   const gotoTab = (n) => { const order = orderTabs(tabsRef.current || []); const t = n >= 9 ? order[order.length - 1] : order[n - 1]; if (t) activateTab(t.id); };
   const stepTab = (d) => { const order = orderTabs(tabsRef.current || []); if (order.length < 2) return; const i = order.findIndex((x) => x.id === activeRef.current); activateTab(order[(i + d + order.length) % order.length].id); };
@@ -358,15 +386,17 @@ export default function App() {
 
   // the browser page is a native view laid over the tab: show it only on the Browser tab and hide it behind pop-ups
   const browserOn = useRef(false);
+  const splitBrowser = (() => { const st = splitTab && (tabs || []).find((t) => t.id === splitTab); return !!st && st.id !== activeTab && kindOf(st.s) === 'browser'; })();
+  const browserShown = (view === 'browser' && !TAB_MODALS.includes(modal)) || splitBrowser;
   useEffect(() => {
-    if (view === 'browser') { if (!browserOn.current) { browserOn.current = true; api.browserOpen(browser.url || 'https://www.google.com'); } }
+    if (browserShown) { if (!browserOn.current) { browserOn.current = true; api.browserOpen(browser.url || 'https://www.google.com'); } }
     else if (browserOn.current) { browserOn.current = false; api.browserClose(); }
-  }, [view]);
-  useEffect(() => { if (browserOn.current) api.browserVisible && api.browserVisible(!palette && !modal && !ctx); }, [palette, modal, ctx, view]);
+  }, [browserShown]);
+  useEffect(() => { if (browserOn.current) api.browserVisible && api.browserVisible(!palette && !(modal && !TAB_MODALS.includes(modal)) && !ctx); }, [palette, modal, ctx, view, browserShown]);
 
   // right-click menus: sidebar pages and chats, and ⌘-click to open in a new tab
   const NAV = {
-    projects: { view: 'projects' }, schedule: { view: 'schedule' }, skills: { view: 'skills' }, agents: { view: 'agents' }, automations: { view: 'automations' },
+    home: { view: 'home' }, projects: { view: 'projects' }, schedule: { view: 'schedule' }, skills: { view: 'skills' }, agents: { view: 'agents' }, automations: { view: 'automations' },
     logs: { view: 'logs' }, terminal: { view: 'terminal' }, browser: { view: 'browser' },
     memory: { modal: 'memory' }, usage: { modal: 'usage' }, connectors: { modal: 'connectors' }, settings: { modal: 'settings' }
   };
@@ -923,7 +953,6 @@ export default function App() {
   const saveSettings = async (s) => {
     const { hasApiKey, ...patch } = s;
     try { setSettings(await api.setSettings(patch)); } catch (e) { console.error('Saving settings failed', e); }
-    setModal(null);
   };
   const changeMemory = (list) => { setMemory(list); api.setStore('memory', list); };
   const toggleMemory = async (on) => setSettings(await api.setSettings({ memoryEnabled: on }));
@@ -1035,14 +1064,21 @@ export default function App() {
   const editingProject = modal && modal.project && modal.project !== 'new' ? projects.find((p) => p.id === modal.project) : null;
   const mac = api.platform === 'darwin';
   const viewProject = view && view.project ? projects.find((p) => p.id === view.project) : null;
-  const chatView = view === 'chat';
+  const pageModal = TAB_MODALS.includes(modal) ? modal : null;
+  const chatView = view === 'chat' && !pageModal;
+  const noteView = view === 'note' && !!notePath && !pageModal;
+  const primaryPage = pageModal || (PAGE_VIEWS.includes(view) ? view : null);
+  const primaryKind = pageModal || (view && view.project ? 'project' : view);
   const chatBusy = isRunning(chat.id);
-  const canSplit = view === 'chat' || view === 'note';
-  const splitT = splitTab && canSplit ? (tabs || []).find((t) => t.id === splitTab && t.id !== activeTab && (t.s.view === 'chat' || t.s.view === 'note')) : null;
-  const chat2 = splitT && splitT.s.view === 'chat' ? chats.find((c) => c.id === splitT.s.chatId) : null;
-  const note2 = splitT && splitT.s.view === 'note' ? splitT.s.notePath : null;
-  const showSplit = !!chat2 && !(view === 'chat' && chat2.id === chat.id);
-  const showNoteSplit = !!note2 && !(view === 'note' && note2 === notePath);
+  const canSplit = SPLIT_KINDS.includes(primaryKind);
+  const splitT = splitTab && canSplit ? (tabs || []).find((t) => t.id === splitTab && t.id !== activeTab && SPLIT_KINDS.includes(kindOf(t.s)) && !(kindOf(t.s) === 'browser' && primaryKind === 'browser')) : null;
+  const kind2 = splitT ? kindOf(splitT.s) : null;
+  const chat2 = kind2 === 'chat' ? chats.find((c) => c.id === splitT.s.chatId) : null;
+  const note2 = kind2 === 'note' ? splitT.s.notePath : null;
+  const page2 = kind2 && kind2 !== 'chat' && kind2 !== 'note' ? kind2 : null;
+  const showSplit = !!chat2 && !(chatView && chat2.id === chat.id);
+  const showNoteSplit = !!note2 && !(noteView && note2 === notePath);
+  const showPageSplit = !!page2 && page2 !== primaryPage;
   const noteProps = { items: notes.items, onCreateNote: (n, f) => noteActions.create(f, n) };
 
   sideApi.current = {
@@ -1055,7 +1091,7 @@ export default function App() {
     go: (sn) => { if (sn.view) setView(sn.view); },
     goNav: (k) => { const sn = NAV[k]; if (!sn) return; if (k === 'terminal' && !termRef.current.tabs.length) newTermTab(); if (sn.view) { setModal(null); setView(sn.view); } if (sn.modal) { if (sn.modal === 'settings') setSettingsTab('general'); setModal(sn.modal); } }
   };
-  const VIEW_INFO = { projects: ['Projects', 'folders'], schedule: ['Scheduled', 'clock'], skills: ['Skills', 'sparkle'], agents: ['Agents', 'layers'], automations: ['Automations', 'bolt'], logs: ['Logs', 'code'], terminal: ['Terminal', 'terminal'], browser: ['Browser', 'globe'] };
+  const VIEW_INFO = { home: ['Home', 'home'], projects: ['Projects', 'folders'], schedule: ['Scheduled', 'clock'], skills: ['Skills', 'sparkle'], agents: ['Agents', 'layers'], automations: ['Automations', 'bolt'], logs: ['Logs', 'code'], terminal: ['Terminal', 'terminal'], browser: ['Browser', 'globe'] };
   const MODAL_INFO = { settings: ['Settings', 'sliders'], memory: ['Memory', 'bulb'], usage: ['Usage', 'chart'], connectors: ['Connectors', 'plug'] };
   const tabInfo = (t) => {
     const sn = t.s;
@@ -1069,7 +1105,7 @@ export default function App() {
   const tabMenu = (e, id) => {
     const t = id && (tabs || []).find((x) => x.id === id);
     const items = t ? [
-      ...((t.s.view === 'chat' || t.s.view === 'note') && id !== activeTab ? [splitTab === id ? { label: 'Close split view', onClick: () => setSplitTab(null) } : { label: 'Open in split view', onClick: () => splitWith(id) }] : splitTab && id === activeTab ? [{ label: 'Close split view', onClick: () => setSplitTab(null) }] : []),
+      ...(SPLIT_KINDS.includes(kindOf(t.s)) && id !== activeTab ? [splitTab === id ? { label: 'Close split view', onClick: () => setSplitTab(null) } : { label: 'Open in split view', onClick: () => splitWith(id) }] : splitTab && id === activeTab ? [{ label: 'Close split view', onClick: () => setSplitTab(null) }] : []),
       { label: t.pinned ? 'Unpin tab' : 'Pin tab', onClick: () => togglePin(id) },
       { label: 'Duplicate tab', onClick: () => duplicateTab(id) },
       { sep: true },
@@ -1111,10 +1147,34 @@ export default function App() {
 
   const setPref = (patch) => api.setSettings(patch).then((st) => setSettings({ ...st })).catch(() => {});
   const openSettings = (tab) => { setSettingsTab(tab); setModal('settings'); };
-  // Settings moves into a tab of its own; the tab it was opened from goes back to what it showed before
-  const settingsToNewTab = (tab) => {
-    setTabs((ts) => (ts || []).map((x) => (x.id === activeTab ? { ...x, s: { ...x.s, modal: null } } : x)));
-    openTab({ view, chatId: currentId, modal: 'settings', settingsTab: tab || 'general' });
+  const homeGo = (k) => {
+    if (k === 'newchat') { newChat(null); return; }
+    if (k === 'newnote') { noteActions.create(''); return; }
+    if (k === 'sentinel') { toggleSentinel(); return; }
+    sideApi.current.goNav(k);
+  };
+  const homePage = (
+    <HomeView chats={chats} projects={projects} notes={notes} settings={settings} memoryCount={settings.memoryEnabled ? memory.length : 0} connectorCount={connectorCount}
+      sentinel={sent.state} agentCount={liveAgents(chats, runningIds).length} statusOf={statusOf}
+      onSend={startProjectChat(null)} onOpenChat={select} onOpenProject={(id) => setView({ project: id })} onOpenNote={(p) => noteActions.open(p)} onGo={homeGo}
+      composerProps={{ settings, onUsageDetails: () => setModal('usage'), onOpenSettings: (t) => { setSettingsTab(t || 'general'); setModal('settings'); } }} />
+  );
+  // What a page shows, in the main pane or (split = true) in the second half of a split view
+  const renderPage = (kind, split) => {
+    const close = split ? () => setSplitTab(null) : closePage;
+    let body = null;
+    if (kind === 'home') return homePage;
+    if (kind === 'browser') return <BrowserPanel full url={browser.url} onUrl={(u) => setBrowser((b) => ({ ...b, url: u }))} onClose={split ? close : () => setView('chat')} />;
+    if (kind === 'schedule') return <SchedulesView projects={projects} models={groups} />;
+    if (kind === 'skills') return <SkillsView projects={projects} />;
+    if (kind === 'logs') return <LogsView />;
+    if (kind === 'automations') return <AutomationsView onOpenSettings={(t) => { setSettingsTab(t || 'general'); setModal('settings'); }} />;
+    if (kind === 'agents') return <AgentsView settings={settings} chats={chats} runningIds={runningIds} groups={groups} onOpenChat={(id) => select(id)} />;
+    if (kind === 'settings') body = <SettingsModal projects={projects} onApply={async (patch) => { try { setSettings({ ...(await api.setSettings(patch)) }); } catch {} }} settings={settings} groups={groups} providers={providers} onProviders={applyProviders} onSave={async (s) => { await saveSettings(s); close(); }} initialTab={split && splitT ? splitT.s.settingsTab : settingsTab} onClose={close} />;
+    if (kind === 'memory') body = <MemoryModal memory={memory} enabled={settings.memoryEnabled} onChange={changeMemory} onToggle={toggleMemory} onClose={close} />;
+    if (kind === 'usage') body = <UsageModal projects={projects} chats={chats} onClose={close} />;
+    if (kind === 'connectors') body = <ConnectorsModal onClose={close} onChanged={(n) => setConnectorCount(n)} />;
+    return body && <PageContext.Provider value={true}><div className="page-host">{body}</div></PageContext.Provider>;
   };
   const SETTING_TABS = [['general', 'General', 'sliders', 'theme appearance text size shortcut'], ['providers', 'Providers', 'plug', 'api keys models'], ['tools', 'Tools & safety', 'wrench', 'terminal permissions'], ['access', 'Access & permissions', 'shield', 'folders computer control'], ['agents', 'Agents', 'layers', 'helpers delegate'], ['brains', 'Brains', 'bulb', 'council'], ['limits', 'Usage limits', 'chart', 'budget cost'], ['voice', 'Voice', 'mic', 'sentinel speech'], ['make', 'Make', 'bolt', 'webhook automation'], ['phone', 'Phone', 'phone', 'telegram mobile remote']];
   const paletteActions = [
@@ -1159,7 +1219,7 @@ export default function App() {
         onOpenProject={(id) => setView({ project: id })} currentId={currentId} view={chatView ? 'chat' : 'other'} statusOf={statusOf}
         onNewChat={() => newChat()} onNewIncognito={newIncognito} onSelect={select} onDelete={deleteChat}
         onRename={(id, title) => updateChat(id, { title })}
-        onProjects={() => setView('projects')} onSchedule={() => setView('schedule')} onSkills={() => setView('skills')} onAgents={() => setView('agents')} onAutomations={() => setView('automations')} onSentinel={toggleSentinel} sentinel={sent.state} onLogs={() => setView('logs')} agentCount={liveAgents(chats, runningIds).length} onPermissions={() => setModal('permissions')} onConnectors={() => setModal('connectors')}
+        onHome={() => setView('home')} onProjects={() => setView('projects')} onSchedule={() => setView('schedule')} onSkills={() => setView('skills')} onAgents={() => setView('agents')} onAutomations={() => setView('automations')} onSentinel={toggleSentinel} sentinel={sent.state} onLogs={() => setView('logs')} agentCount={liveAgents(chats, runningIds).length} onPermissions={() => setModal('permissions')} onConnectors={() => setModal('connectors')}
         onSettings={() => { setSettingsTab('general'); setModal('settings'); }} onMemory={() => setModal('memory')} onUsage={() => setModal('usage')}
         onTerminal={() => { if (!termRef.current.tabs.length) newTermTab(); setView('terminal'); }}
         notes={{ items: notes.items, root: notes.root, active: view === 'note' ? notePath : null, onOpen: noteActions.open, onNew: (f) => noteActions.create(f), onNewFolder: noteActions.createFolder, onRename: noteActions.rename, onDelete: noteActions.remove, onMove: noteActions.move, onPickRoot: noteActions.pickRoot, onReveal: noteActions.reveal }}
@@ -1172,25 +1232,19 @@ export default function App() {
 
       <main className="main">
         {topbar}
-        {view === 'browser' && <BrowserPanel full url={browser.url} onUrl={(u) => setBrowser((b) => ({ ...b, url: u }))} onClose={() => setView('chat')} />}
-
-        {view === 'schedule' && <SchedulesView projects={projects} models={groups} />}
-        {view === 'skills' && <SkillsView projects={projects} />}
-        {view === 'logs' && <LogsView />}
-        {view === 'automations' && <AutomationsView onOpenSettings={(t) => { setSettingsTab(t || 'general'); setModal('settings'); }} />}
-        {view === 'agents' && <AgentsView settings={settings} chats={chats} runningIds={runningIds} groups={groups} onOpenChat={(id) => select(id)} />}
-        {view === 'projects' && (
+        {view === 'projects' && !pageModal && (
           <ProjectsList onPin={(id) => setProjects((ps) => ps.map((p) => (p.id === id ? { ...p, pinned: !p.pinned } : p)))} projects={projects} chats={chats} onOpen={(id) => setView({ project: id })} onNew={() => setModal({ project: 'new' })} />
         )}
-        {viewProject && (
+        {viewProject && !pageModal && (
           <ProjectPage
             project={viewProject} chats={chats} statusOf={statusOf} onBack={() => setView('projects')}
             onEdit={() => setModal({ project: viewProject.id })} onSelect={select} onStartChat={startProjectChat(viewProject.id)}
           />
         )}
-        {(chatView || (view === 'note' && notePath)) && (
+        {(chatView || noteView || primaryPage) && (
           <div className="split-wrap">
-          {view === 'note' && notePath && <div className="pane"><NoteEditor key={notePath + ':' + noteRev} path={notePath} {...noteProps} onOpenNote={(p) => noteActions.open(p, 'here')} /></div>}
+          {primaryPage && <div className="pane">{renderPage(primaryPage, false)}</div>}
+          {noteView && <div className="pane"><NoteEditor key={notePath + ':' + noteRev} path={notePath} {...noteProps} onOpenNote={(p) => noteActions.open(p, 'here')} /></div>}
           {chatView && <div className="pane">
             <section className="messages" ref={listRef} onScroll={onScroll}>
               {chat.messages.length === 0 ? (
@@ -1227,6 +1281,15 @@ export default function App() {
                 onCompact: () => compactChat(chat2), canCompact: canCompact(chat2), compacting
               }} />
           )}
+          {showPageSplit && (
+            <section className="split-pane" data-page-pane={page2}>
+              <header className="split-head">
+                <div className="chat-title"><Icon name={tabInfo(splitT).icon} size={15} className="incog-ico" /> {tabInfo(splitT).title}</div>
+                <button className="icon-btn nodrag" title="Close split view" onClick={() => setSplitTab(null)}><Icon name="x" size={16} /></button>
+              </header>
+              {renderPage(page2, true)}
+            </section>
+          )}
           {showNoteSplit && (
             <section className="split-pane" data-note-pane={note2}>
               <header className="split-head">
@@ -1258,13 +1321,9 @@ export default function App() {
         </aside>
       )}
 
-      {modal === 'settings' && <SettingsModal projects={projects} onApply={async (patch) => { try { setSettings({ ...(await api.setSettings(patch)) }); } catch {} }} settings={settings} groups={groups} providers={providers} onProviders={applyProviders} onSave={saveSettings} initialTab={settingsTab} onNewTab={settingsToNewTab} onClose={() => setModal(null)} />}
-      {modal === 'memory' && <MemoryModal memory={memory} enabled={settings.memoryEnabled} onChange={changeMemory} onToggle={toggleMemory} onClose={() => setModal(null)} />}
       {modal === 'permissions' && <PermissionsModal firstRun={!settings.permissionsAsked} onClose={() => { if (!settings.permissionsAsked) { api.setSettings({ permissionsAsked: true }); setSettings((x) => ({ ...x, permissionsAsked: true })); } setModal(null); }} />}
       {modal === 'profile' && <ProfileModal settings={settings} avatar={avatar} onAvatar={setAvatar} onSave={async (patch) => { setSettings(await api.setSettings(patch)); setModal(null); }} onClose={() => setModal(null)} />}
       <ContextMenu menu={ctx} onClose={() => setCtx(null)} />
-      {modal === 'usage' && <UsageModal projects={projects} chats={chats} onClose={() => setModal(null)} />}
-      {modal === 'connectors' && <ConnectorsModal onClose={() => setModal(null)} onChanged={(n) => setConnectorCount(n)} />}
       {modal && modal.project && (modal.project === 'new' || editingProject) && (
         <ProjectModal project={editingProject} onSave={saveProject} onDelete={deleteProject} onClose={() => setModal(null)} />
       )}

@@ -182,3 +182,9 @@
 .notes-links button:hover { color: var(--text); text-decoration: underline; }
 .split-pane > .note-editor, .pane > .note-editor { flex: 1; min-height: 0; }
 .note-editor .notes-bar { flex-wrap: wrap; }
+
+/* Settings, Memory, Usage and Connectors as pages (a tab or half of a split view) instead of pop-ups */
+.page-host { flex: 1; min-height: 0; min-width: 0; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 18px 20px 24px; }
+.page-host > .modal.page { width: 100%; max-width: 860px; max-height: none; border: 0; border-radius: 0; box-shadow: none; padding: 0; background: transparent; overflow: visible; }
+.page-host > .modal.page.settings { max-width: 980px; height: calc(100% - 2px); min-height: 420px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg); overflow: hidden; }
+.split-pane .page-host { padding: 12px; }
