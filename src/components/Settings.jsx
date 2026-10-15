@@ -37,13 +37,13 @@ export function SettingsModal({ settings, groups = [], projects = [], providers 
   const refreshThemes = async () => {
     try {
       const r = await api.themesList(projectFolder);
-      if (r) setThemeInfo({ themes: r.themes || [], folder: (r.folders && r.folders.project) || (r.folders && r.folders.user) || '' });
+      if (r) setThemeInfo({ themes: r.themes || [], folder: (r.folders && r.folders.user) || '' });
     } catch {}
   };
   const importThemes = async () => {
     setThemeBusy(true);
     try {
-      const r = await api.themesImport(projectFolder);
+      const r = await api.themesImport('');
       if (r) setThemeMsg(r.added ? `Imported: ${r.added.join(', ')}` : '');
       await refreshThemes(); onApply({});
     } catch (e) { setThemeMsg(String((e && e.message) || e)); }
@@ -86,11 +86,11 @@ export function SettingsModal({ settings, groups = [], projects = [], providers 
                 </div>
                 <div className="row" style={{ alignItems: 'center', marginTop: 8 }}>
                   <button type="button" onClick={refreshThemes} disabled={themeBusy}>{themeBusy ? 'Refreshing…' : 'Refresh'}</button>
-                  <button type="button" onClick={() => api.themesOpen('project').then(refreshThemes).catch(() => {})}>Open folder</button>
+                  <button type="button" onClick={() => api.themesOpen('user').then(refreshThemes).catch(() => {})}>Open folder</button>
                   <button type="button" onClick={importThemes} disabled={themeBusy}>Import .json</button>
                   <span className="hint">{themeMsg || `${themeList.length} themes · ${themeInfo.folder || ''}`}</span>
                 </div>
-                <div className="hint">Drop a theme .json in that folder and press Refresh — no rebuild. A file is <code>{'{ "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. The project’s .artemis/themes wins over the user folder.</div>
+                <div className="hint">Drop a theme .json in that folder and press Refresh — no rebuild. A file is <code>{'{ "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. A project can also carry its own themes in .artemis/themes; those win over this folder.</div>
               </div>
               <Field label="Text size" hint="Size of the text across the whole app.">
                 <Select value={s.textSize || 'medium'} onChange={(e) => { setS({ ...s, textSize: e.target.value }); onApply({ textSize: e.target.value }); }}>{TEXT_SIZES.map(([id, n, px]) => <option key={id} value={id}>{n} ({px}px)</option>)}</Select>
