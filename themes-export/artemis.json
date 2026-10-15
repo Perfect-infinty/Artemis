@@ -1,0 +1,27 @@
+{
+  "id": "artemis",
+  "name": "Artemis",
+  "group": "Gods",
+  "dark": true,
+  "preview": [
+    "#101916",
+    "#8fb5a0",
+    "#16231e"
+  ],
+  "vars": {
+    "--theme-bg": "#101916",
+    "--theme-side": "#0b1210",
+    "--theme-panel": "#16231e",
+    "--theme-user": "#1b2c25",
+    "--theme-code": "#0b1210",
+    "--theme-border": "#26382f",
+    "--theme-text": "#dde5df",
+    "--theme-muted": "#8a9e93",
+    "--theme-accent": "#8fb5a0",
+    "--theme-accent-text": "#0b1210",
+    "--theme-hover": "rgba(255,255,255,.05)",
+    "--theme-active": "rgba(255,255,255,.09)",
+    "--theme-add": "rgba(90,200,140,.16)",
+    "--theme-del": "rgba(240,100,100,.16)"
+  }
+}

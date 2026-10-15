@@ -1,0 +1,1567 @@
+const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, nativeTheme, dialog, session, screen, globalShortcut, Notification, Tray, nativeImage, protocol, systemPreferences, desktopCapturer } = require('electron');
+try { protocol.registerSchemesAsPrivileged([{ scheme: 'artifact', privileges: { standard: true, secure: true } }]); } catch {}
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const http = require('http');
+const crypto = require('crypto');
+const { runAgent, summarizeAll } = require('./agent');
+const brainsLib = require('./brains');
+const { createSentinelWidget } = require('./sentinel-widget');
+const { createLogger } = require('./logger');
+// ---------- app log (file + Logs page) ----------
+const logger = createLogger({
+  dir: path.join(app.getPath('home'), '.ares', 'logs'),
+  onEntry: (e) => { try { win?.webContents.send('log:entry', e); } catch {} },
+  onProgress: (list) => { try { win?.webContents.send('log:progress', list); } catch {} }
+});
+process.on('uncaughtException', (err) => { logger.error('main', 'Uncaught exception: ' + ((err && err.message) || err), err); });
+process.on('unhandledRejection', (err) => { logger.error('main', 'Unhandled rejection: ' + ((err && err.message) || err), err); });
+for (const lv of ['warn', 'error']) { const orig = console[lv].bind(console); console[lv] = (...a) => { orig(...a); try { logger.log(lv, 'console', a.map((x) => (x instanceof Error ? x.message : typeof x === 'string' ? x : JSON.stringify(x))).join(' ')); } catch {} }; }
+logger.info('app', `Artemis started (v${app.getVersion()}, ${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
+const files = require('./files');
+const web = require('./web');
+const mediaGen = require('./media');
+const { createComputer } = require('./computer');
+const { createFloat } = require('./float');
+const { createQuick } = require('./quick');
+const { createPalette } = require('./palette');
+const { createRemote } = require('./remote');
+const { createMcpManager, parseImport } = require('./mcp');
+const tools = require('./tools');
+const themes = require('./themes');
+
+const IS_DEV = !!process.env.ELECTRON_DEV;
+// .env (git-ignored): extra environment variables such as TELEGRAM_BOT_TOKEN
+try {
+  const envFile = path.join(__dirname, '..', '.env');
+  if (fs.existsSync(envFile)) {
+    for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    }
+  }
+} catch {}
+
+// ---------- storage ----------
+// The app used to be called "AI Desktop", then "Zero"; keep reading the old data folder so chats and settings carry over.
+try {
+  for (const name of ['AI Desktop', 'Zero', 'Artemis']) {
+    const legacy = path.join(app.getPath('appData'), name);
+    if (fs.existsSync(legacy)) { app.setPath('userData', legacy); break; }
+  }
+} catch {}
+const dataFile = (name) => path.join(app.getPath('userData'), `${name}.json`);
+function readJson(name, fallback) {
+  try { return JSON.parse(fs.readFileSync(dataFile(name), 'utf8')); } catch (e) { if (e && e.code !== 'ENOENT') logger.error('store', `Could not read ${name}.json: ${e.message}`); return fallback; }
+}
+function writeJson(name, data) {
+  const file = dataFile(name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, file);
+}
+const STORES = { chats: [], projects: [], memory: [] };
+
+// ---------- usage stats (tokens per request; no message content is stored) ----------
+const USAGE_MAX = 20000;
+function recordUsage(entry) {
+  try {
+    const list = readJson('usage', []);
+    list.push(entry);
+    logger.debug('usage', `${entry.model} · ${entry.prompt || 0} in / ${entry.completion || 0} out${entry.source ? ' · ' + entry.source : ''}`);
+    writeJson('usage', list.length > USAGE_MAX ? list.slice(-USAGE_MAX) : list);
+  } catch {}
+}
+ipcMain.handle('usage:get', () => readJson('usage', []));
+ipcMain.handle('usage:clear', () => { writeJson('usage', []); return []; });
+const { checkLimits } = require('./limits');
+const providersLib = require('./providers');
+const { createSkills } = require('./skills');
+const { createSkillHub } = require('./skillhub');
+const { createAgents } = require('./subagents');
+const { createMake, ZONES: MAKE_ZONES, cleanZone: cleanMakeZone, validZone: validMakeZone } = require('./make');
+const chatSearch = require('./chatsearch');
+const { createScheduler } = require('./scheduler');
+const { createPermissions } = require('./permissions');
+const readProviders = () => { const l = readJson('providers', []); const list = Array.isArray(l) ? l : []; providersLib.registerHeaders(list); return list; };
+const readProviderKeys = () => readJson('providerkeys', {});
+const getProviderKey = (id) => decStr(readProviderKeys()[id]);
+const limitState = () => checkLimits(readJson('usage', []), getSettings(), Date.now(), providersLib.priceMap(readProviders()));
+const skills = createSkills({
+  userDir: path.join(app.getPath('userData'), 'skills'),
+  getDisabled: () => getSettings().disabledSkills || [],
+  setDisabled: (list) => saveSettings({ disabledSkills: list }),
+  notify: () => { try { win?.webContents.send('skills:changed'); } catch {} }
+});
+const brains = brainsLib.createBrains({
+  userDir: path.join(app.getPath('userData'), 'brains'),
+  notify: () => { try { win?.webContents.send('brains:changed'); } catch {} }
+});
+const agents = createAgents({
+  userDir: path.join(app.getPath('userData'), 'agents'),
+  notify: () => { try { win?.webContents.send('agents:changed'); } catch {} }
+});
+const chatsApi = () => ({
+  search: (q, n) => chatSearch.searchChats(readJson('chats', []), q, { limit: n, projects: readJson('projects', []) }),
+  read: (id, last) => { const c = (readJson('chats', []) || []).find((x) => x.id === id && !x.incognito); return c ? chatSearch.transcript(c, { last }) : null; }
+});
+const mcp = createMcpManager();
+const oauthPending = new Map();
+const oauthCallbackServer = http.createServer((req, res) => {
+  if (!req.url.startsWith('/callback')) { res.writeHead(404); return res.end(); }
+  const u = new URL(req.url, 'http://127.0.0.1');
+  const state = u.searchParams.get('state'); const pending = oauthPending.get(state);
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end('<h2>Artemis OAuth complete</h2><p>You can close this window and return to Artemis.</p>');
+  if (!pending) return;
+  oauthPending.delete(state);
+  if (u.searchParams.get('error')) return pending.reject(new Error(u.searchParams.get('error_description') || u.searchParams.get('error')));
+  pending.resolve({ code: u.searchParams.get('code'), state });
+});
+oauthCallbackServer.listen(0, '127.0.0.1');
+let shortcutError = '';
+let quitting = false;
+let tray = null;
+let quick = null;
+let palette = null;
+
+const DEFAULT_SETTINGS = {
+  model: '', // set by picking a model from a provider; empty = the first model of the first enabled provider
+  imageModel: '', // prov:<provider>:<model>; empty = image generation is off
+  videoModel: '',
+  systemPrompt: '',
+  personality: '', personalityCustom: '', // how Artemis talks: a preset from electron/personality.json plus your own notes
+  theme: 'system',
+  textSize: 'medium',
+  maxTokens: 8192,
+  reasoningEffort: '', // '' = leave it to the model; low / medium / high is sent as reasoning_effort. A chat can override it.
+  dailyTokenLimit: 0,
+  monthlyTokenLimit: 0,
+  permissionsAsked: false,
+  dailyUsdLimit: 0,
+  monthlyUsdLimit: 0,
+  toolsEnabled: true,
+  autoApproveEdits: false,
+  remoteContinueLast: true,
+  memoryEnabled: true,
+  webEnabled: true,
+  shellEnabled: true,
+  computerEnabled: true,
+  telegramEnabled: false,
+  telegramChatId: '',
+  remoteFolder: '',
+  remoteModel: '',
+  remoteProjectId: '',
+  remoteAllowDangerous: true,
+  telegramTokenEnc: null,
+  connectorsEnabled: true,
+  quickChatShortcut: 'CommandOrControl+Shift+Space',
+  paletteShortcut: 'CommandOrControl+K', // opens Artemis and its command palette from any app; empty = off
+  closeToTray: true,
+  makeEnabled: true,
+  voiceSttProvider: '',
+  voiceSttModel: 'whisper-1',
+  voiceLanguage: 'auto',
+  voiceAutoRead: false,
+  connectorsLazy: true, fullFileAccess: true, toolsLazy: true, mcpServerEnabled: false, mcpServerPort: 8788, mcpTokenEnc: null,
+  mcpAlwaysAllow: false, notesAi: true, sentinelPreload: false, sentinelAuto: false, sentinelInterrupt: false, sentinelNameOnly: true, sentinelSensitivity: 'normal',
+  sentinelModel: '', // empty = the default model; a fast model makes voice answers start sooner,
+  sentinelPos: null,
+  micDeviceId: '',
+  speakerDeviceId: '',
+  voiceName: '',
+  voiceRate: 1,
+  ttsEngine: 'system', ttsUrl: '', ttsModel: '', ttsVoice: '', ttsVoiceEn: '',
+  defaultBrain: '',
+  makeZone: 'eu1.make.com',
+  launchAtLogin: false,
+  skillsEnabled: true,
+  autoLearn: true,
+  delegateEnabled: true,
+  agentWriteApproval: true,
+  profileName: '',
+  profileAbout: '',
+  profileLocation: '', // where the user is (city, country); used for "near me" questions
+  chatSearchEnabled: true,
+  disabledSkills: []
+};
+const getSettings = () => ({ ...DEFAULT_SETTINGS, ...readJson('settings', {}) });
+
+const SECRET_FIELDS = { telegramToken: 'telegramTokenEnc', makeToken: 'makeTokenEnc', mcpToken: 'mcpTokenEnc' };
+const cleanSecret = (v) => String(v == null ? '' : v).replace(/[\s\u00a0\u200b-\u200f\u2028\u2029\ufeff]+/g, '');
+const encStr = (v0) => { const v = cleanSecret(v0); return (!v ? null : safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(v).toString('base64') : 'plain:' + v); };
+let decWarned = false;
+const decStr = (e) => {
+  if (!e) return '';
+  try {
+    const v = cleanSecret(e.startsWith('plain:') ? e.slice(6) : safeStorage.decryptString(Buffer.from(e, 'base64')));
+    // A key that was encrypted under another app identity can "decrypt" into garbage instead of failing: treat that as unreadable.
+    if (/[^\x21-\x7e]/.test(v)) throw new Error('the saved key decrypts to garbage');
+    return v;
+  } catch (err) { if (!decWarned) { decWarned = true; logger.warn('secrets', `A saved key could not be decrypted (${(err && err.message) || err}). On a Mac this usually means the Keychain item "Electron Safe Storage" was denied or the app identity changed. Type the key again in Settings.`); } return ''; }
+};
+const getSecret = (name) => decStr(getSettings()[SECRET_FIELDS[name]]) || (name === 'telegramToken' ? process.env.TELEGRAM_BOT_TOKEN || '' : '');
+const setSecret = (name, value) => writeJson('settings', { ...getSettings(), [SECRET_FIELDS[name]]: encStr(value) });
+const saveSettings = (patch) => writeJson('settings', { ...getSettings(), ...patch });
+
+const publicSettings = () => ({ ...getSettings(), telegramTokenEnc: undefined, makeTokenEnc: undefined, mcpTokenEnc: undefined, hasMakeToken: !!getSecret('makeToken'), hasApiKey: readProviders().some((p) => p.enabled !== false && (p.models || []).length && (!p.needsKey || getProviderKey(p.id))), hasTelegramToken: !!getSecret('telegramToken'), shortcutError });
+
+// ---------- themes (JSON palettes, so a new theme needs no rebuild) ----------
+/** The project folder of the newest chat's project: where a project theme file would sit. */
+const openProjectFolder = () => {
+  try {
+    const chats = readJson('chats', []);
+    const id = [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] && [...chats].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0].projectId;
+    const project = id && readJson('projects', []).find((p) => p.id === id);
+    return project && project.folder ? project.folder : undefined;
+  } catch { return undefined; }
+};
+const themeDirs = (folderArg) => {
+  const folder = typeof folderArg === 'string' && folderArg ? folderArg : openProjectFolder();
+  return { user: path.join(app.getPath('userData'), 'themes'), project: folder ? path.join(folder, '.ares', 'themes') : undefined };
+};
+/** Settings reads the themes: the folder of project "latest", or the project the renderer names. */
+const listThemes = (folderArg) => { const d = themeDirs(folderArg); return { ...themes.list(d), folders: { user: d.user, project: d.project || null } }; };
+const nativeThemeFor = () => {
+  const id = getSettings().theme || 'system';
+  if (id === 'system') nativeTheme.themeSource = 'system';
+  else { const t = listThemes().themes.find((x) => x.id === id); nativeTheme.themeSource = t && t.dark === false ? 'light' : 'dark'; }
+};
+/** Palette changes have to reach the main window, the palette window and the sticky widget. */
+const broadcastTheme = () => {
+  try { win?.webContents.send('theme:changed'); } catch {}
+  for (const w of BrowserWindow.getAllWindows()) { try { w.webContents.send('theme:changed'); } catch {} }
+};
+
+// ---------- pencere ----------
+let win;
+let browserView = null;
+let browserRect = null; // set by the renderer: where the empty browser panel sits in the window
+function browserBounds() {
+  if (!win || win.isDestroyed()) return null;
+  if (browserRect) return browserRect;
+  const { width, height } = win.getContentBounds();
+  return { x: Math.max(0, width - 460), y: 96, width: Math.min(460, width), height: Math.max(100, height - 96) };
+}
+function showBrowser(url) {
+  if (!win || win.isDestroyed()) return false;
+  if (!browserView) {
+    const { WebContentsView } = require('electron');
+    browserView = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true } });
+    browserView.webContents.setWindowOpenHandler(({ url: next }) => { win.webContents.send('browser:request', next); return { action: 'deny' }; });
+    const report = (_e, next) => { if (/^https?:/i.test(next || '') && win && !win.isDestroyed()) win.webContents.send('browser:url', next); };
+    browserView.webContents.on('will-navigate', report);
+    browserView.webContents.on('did-navigate', report);
+    browserView.webContents.on('did-navigate-in-page', report);
+    win.contentView.addChildView(browserView);
+  }
+  const b = browserBounds(); if (b) browserView.setBounds(b);
+  if (url) browserView.webContents.loadURL(url);
+  browserView.setVisible(true);
+  return true;
+}
+function hideBrowser() { if (browserView) browserView.setVisible(false); browserRect = null; }
+ipcMain.handle('browser:bounds', (_e, r) => {
+  if (!r || ![r.x, r.y, r.width, r.height].every(Number.isFinite)) return false;
+  browserRect = { x: Math.max(0, Math.round(r.x)), y: Math.max(0, Math.round(r.y)), width: Math.max(50, Math.round(r.width)), height: Math.max(50, Math.round(r.height)) };
+  if (browserView) browserView.setBounds(browserRect);
+  return true;
+});
+ipcMain.handle('browser:visible', (_e, v) => { if (browserView) browserView.setVisible(!!v); return true; });
+ipcMain.handle('browser:nav', (_e, a) => {
+  const wc = browserView && browserView.webContents; if (!wc) return false;
+  if (a === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
+  else if (a === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
+  else if (a === 'reload') wc.reload();
+  return true;
+});
+ipcMain.handle('browser:external', (_e, u) => { if (/^https?:\/\//i.test(String(u || ''))) { shell.openExternal(String(u)); return true; } return false; });
+function createWindow() {
+  const isMac = process.platform === 'darwin';
+  win = new BrowserWindow({
+    width: 1240, height: 820, minWidth: 820, minHeight: 540,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#262624' : '#faf9f5',
+    icon: process.platform === 'darwin' ? path.join(__dirname, '..', 'build', 'Artemis.icns') : path.join(__dirname, 'assets', 'tray.png'),
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    trafficLightPosition: { x: 18, y: 18 },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
+      backgroundThrottling: false // Sentinel keeps listening while the window is minimized or hidden
+    }
+  });
+  if (IS_DEV) win.loadURL('http://localhost:5173');
+  else win.loadFile(path.join(__dirname, '..', 'dist', 'renderer', 'index.html'));
+
+  // closing the window keeps the app (and the phone bot) running in the tray
+  win.on('close', (e) => {
+    if (!quitting && getSettings().closeToTray && tray) { e.preventDefault(); win.hide(); }
+  });
+  const keepDock = () => { if (process.platform === 'darwin' && app.dock) { try { app.dock.show(); } catch {} } };
+  win.on('minimize', keepDock); win.on('hide', keepDock); win.on('restore', keepDock); win.on('show', keepDock);
+  win.on('resize', () => { const b = browserBounds(); if (browserView && b) browserView.setBounds(b); });
+  win.on('closed', () => { browserView?.webContents.close(); browserView = null; win = null; });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    const cur = (() => { try { return win.webContents.getURL().split('#')[0]; } catch { return ''; } })();
+    const internal = url.split('#')[0] === cur || url.startsWith('http://localhost:5173'); // a dropped file must not replace the app page
+    if (!internal) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); }
+  });
+}
+
+// ---------- IPC: storage / settings ----------
+ipcMain.handle('store:get', (_e, name) => (name in STORES ? readJson(name, STORES[name]) : null));
+ipcMain.handle('store:set', (_e, name, data) => { if (name in STORES) writeJson(name, data); return true; });
+ipcMain.handle('settings:get', () => publicSettings());
+ipcMain.handle('settings:set', async (_e, patch) => {
+  // never let the renderer overwrite stored secrets: undefined values survive IPC and would wipe them
+  const { apiKey, apiKeyEnc, telegramToken, telegramTokenEnc, makeTokenEnc, mcpTokenEnc, mcpServerEnabled, mcpServerPort, mcpAlwaysAllow, hasMakeToken, hasApiKey, hasTelegramToken, ...rest } = patch;
+  // an empty field means "unchanged", never "delete"
+  if (typeof telegramToken === 'string' && telegramToken.trim()) setSecret('telegramToken', telegramToken.trim());
+  const before = getSettings();
+  saveSettings(rest);
+  if (rest.theme) nativeThemeFor();
+  // Restart the Telegram bot only when something about them changed, and never make the Save button wait for it
+  // (stopping Telegram long-polling or a busy port can take a long time).
+  const remoteKeys = ['telegramEnabled'];
+  const remoteChanged = (typeof telegramToken === 'string' && telegramToken.trim()) || remoteKeys.some((k) => k in rest && String(rest[k]) !== String(before[k]));
+  if (remoteChanged) remote.reconfigure().catch((e) => logger.error('app', 'Phone services restart failed: ' + ((e && e.message) || e)));
+  try { if (('quickChatShortcut' in rest && rest.quickChatShortcut !== before.quickChatShortcut) || ('paletteShortcut' in rest && rest.paletteShortcut !== before.paletteShortcut)) applyShortcut(); } catch (e) { logger.error('app', 'Shortcut failed: ' + ((e && e.message) || e)); }
+  try { if ('launchAtLogin' in rest && rest.launchAtLogin !== before.launchAtLogin) applyLoginItem(); } catch (e) { logger.error('app', 'Login item failed: ' + ((e && e.message) || e)); }
+  logger.info('app', 'Settings saved', { keys: Object.keys(rest).length, phoneRestart: !!remoteChanged });
+  return publicSettings();
+});
+
+// ---------- IPC: model providers (OpenAI-compatible endpoints) ----------
+const publicProviders = () => readProviders().map((p) => ({ ...p, hasKey: !!getProviderKey(p.id) }));
+const claudeUsage = require('./claude-usage').createClaudeUsage();
+ipcMain.handle('claude:usage', (_e, o) => claudeUsage({ force: !!(o && o.force) }));
+ipcMain.handle('providers:presets', () => providersLib.PRESETS);
+ipcMain.handle('providers:list', () => ({ providers: publicProviders(), prices: providersLib.priceMap(readProviders()) }));
+ipcMain.handle('providers:save', (_e, p, apiKey) => {
+  const list = readProviders();
+  const clean = providersLib.normalize(p || {}, p && p.id);
+  const i = list.findIndex((x) => x.id === clean.id);
+  if (i >= 0) list[i] = clean; else list.push(clean);
+  writeJson('providers', list);
+  if (typeof apiKey === 'string') {
+    const keys = readProviderKeys();
+    if (apiKey.trim()) keys[clean.id] = encStr(apiKey.trim());
+    else if (p && p.clearKey) delete keys[clean.id];
+    writeJson('providerkeys', keys);
+  }
+  return { providers: publicProviders(), prices: providersLib.priceMap(list), saved: clean.id };
+});
+ipcMain.handle('providers:delete', (_e, id) => {
+  writeJson('providers', readProviders().filter((p) => p.id !== id));
+  const keys = readProviderKeys(); delete keys[id]; writeJson('providerkeys', keys);
+  return { providers: publicProviders(), prices: providersLib.priceMap(readProviders()) };
+});
+ipcMain.handle('providers:test', (_e, p, apiKey) => {
+  const key = (typeof apiKey === 'string' && apiKey.trim()) || (p && p.id ? getProviderKey(p.id) : '') || '';
+  return providersLib.probe({ baseUrl: p && p.baseUrl, key, models: p && p.models, headers: p && p.headers });
+});
+
+// ---------- IPC: skills ----------
+const skillRoot = (rootArg) => (rootArg && fs.existsSync(rootArg) ? rootArg : null);
+ipcMain.handle('skills:list', (_e, root) => skills.list(skillRoot(root)).map(({ dir, ...s }) => s));
+ipcMain.handle('skills:get', (_e, name, root) => { const s = skills.get(name, skillRoot(root)); if (!s) return null; const { dir, ...rest } = s; return rest; });
+ipcMain.handle('skills:save', (_e, sk, root) => skills.save({ name: sk?.name, description: sk?.description, body: sk?.body, scope: sk?.scope, by: 'user' }, skillRoot(root)));
+ipcMain.handle('skills:delete', (_e, name, root) => skills.remove(name, skillRoot(root)));
+ipcMain.handle('skills:toggle', (_e, name, on, root) => skills.setEnabled(name, !!on, skillRoot(root)));
+ipcMain.handle('skills:import', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Choose a SKILL.md file or a skill folder', properties: ['openFile', 'openDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  return skills.importFrom(r.filePaths[0]);
+});
+const skillHub = createSkillHub({ userDir: path.join(app.getPath('userData'), 'skills'), notify: () => { try { win?.webContents.send('skills:changed'); } catch {} } });
+ipcMain.handle('skillhub:search', (_e, o) => skillHub.search(o || {}));
+ipcMain.handle('skillhub:preview', (_e, o) => skillHub.preview(o || {}));
+ipcMain.handle('skillhub:install', (_e, o) => skillHub.install(o || {}));
+ipcMain.handle('skillhub:installed', () => skillHub.installed());
+// ---------- IPC: themes ----------
+ipcMain.handle('themes:list', (_e, folder) => listThemes(folder));
+ipcMain.handle('themes:folder', (_e, which) => { const d = themeDirs(); const target = which === 'user' ? d.user : d.project || d.user; fs.mkdirSync(target, { recursive: true }); return target; });
+ipcMain.handle('themes:open', async (_e, which) => { const d = themeDirs(); const target = which === 'user' ? d.user : d.project || d.user; fs.mkdirSync(target, { recursive: true }); const err = await shell.openPath(target); return err ? { ok: false, error: err } : { ok: true, folder: target }; });
+ipcMain.handle('themes:import', async (_e, folder) => {
+  const d = themeDirs();
+  const target = folder && d.project && path.resolve(folder) === path.resolve(d.project) ? d.project : d.user;
+  const picked = await dialog.showOpenDialog(win, { title: 'Import theme', filters: [{ name: 'Theme', extensions: ['json'] }], properties: ['openFile', 'multiSelections'] });
+  if (picked.canceled || !picked.filePaths.length) return null;
+  const out = themes.importFiles(picked.filePaths, { user: d.user, project: target });
+  nativeThemeFor(); broadcastTheme();
+  return out;
+});
+ipcMain.handle('themes:delete', (_e, file) => { const d = themeDirs(); const out = themes.removeFile(file, d); const id = getSettings().theme; if (!listThemes().themes.some((t) => t.id === id)) saveSettings({ theme: 'system' }); nativeThemeFor(); broadcastTheme(); return out; });
+ipcMain.handle('themes:reveal', () => { const d = themeDirs(); const target = d.project || d.user; fs.mkdirSync(target, { recursive: true }); shell.openPath(target); return target; });
+
+ipcMain.handle('skills:reveal', () => { fs.mkdirSync(path.join(app.getPath('userData'), 'skills'), { recursive: true }); shell.openPath(path.join(app.getPath('userData'), 'skills')); return true; });
+// ---------- IPC: profile (about you + avatar in ~/.ares/user/images) ----------
+const profileDir = () => path.join(app.getPath('home'), '.ares', 'user');
+const avatarFile = (ext = 'png') => path.join(profileDir(), 'images', `avatar.${ext}`);
+function avatarData() {
+  for (const [ext, mime] of [['gif', 'image/gif'], ['png', 'image/png']]) {
+    try { return `data:${mime};base64,` + fs.readFileSync(avatarFile(ext)).toString('base64'); } catch {}
+  }
+  return null;
+}
+ipcMain.handle('profile:get', () => ({ avatar: avatarData(), folder: profileDir() }));
+ipcMain.handle('profile:pick-avatar', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Choose a profile picture', properties: ['openFile'], filters: [{ name: 'Images (GIFs stay animated)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }] });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  const file = r.filePaths[0];
+  fs.mkdirSync(path.dirname(avatarFile()), { recursive: true });
+  if (/\.gif$/i.test(file)) {
+    // keep GIFs as they are so they stay animated (a resize would flatten them to one frame)
+    if (fs.statSync(file).size > 8 * 1024 * 1024) return { ok: false, error: 'That GIF is larger than 8 MB. Pick a smaller one.' };
+    fs.copyFileSync(file, avatarFile('gif'));
+    try { fs.unlinkSync(avatarFile('png')); } catch {}
+    return { ok: true, avatar: avatarData() };
+  }
+  const img = nativeImage.createFromPath(file);
+  if (img.isEmpty()) return { ok: false, error: 'That file could not be read as an image.' };
+  const { width, height } = img.getSize();
+  const side = Math.min(width, height);
+  const out = img.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side }).resize({ width: 256, height: 256, quality: 'best' });
+  fs.writeFileSync(avatarFile('png'), out.toPNG());
+  try { fs.unlinkSync(avatarFile('gif')); } catch {}
+  return { ok: true, avatar: avatarData() };
+});
+ipcMain.handle('profile:clear-avatar', () => { for (const e of ['png', 'gif']) { try { fs.unlinkSync(avatarFile(e)); } catch {} } return { ok: true, avatar: null }; });
+ipcMain.handle('profile:reveal', () => { fs.mkdirSync(path.join(profileDir(), 'images'), { recursive: true }); shell.openPath(profileDir()); return true; });
+
+// ---------- IPC: agents ----------
+ipcMain.handle('brains:list', () => brains.list());
+ipcMain.handle('brains:save', (_e, b) => brains.save(b));
+ipcMain.handle('brains:delete', (_e, name) => brains.remove(name));
+// Project logo: processed here, saved in <project folder>/.ares/ (or ~/.ares/project-logos) and returned as a data URL kept on the project.
+const logoDir = (folder) => (folder && fs.existsSync(folder) ? path.join(folder, '.ares') : path.join(os.homedir(), '.ares', 'project-logos'));
+ipcMain.handle('project:pick-logo', async (_e, folder) => {
+  const r = await dialog.showOpenDialog(win, { title: 'Choose a project logo', properties: ['openFile'], filters: [{ name: 'Images (GIFs stay animated)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }] });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  const file = r.filePaths[0];
+  const dir = logoDir(folder);
+  try {
+    if (/\.gif$/i.test(file)) {
+      if (fs.statSync(file).size > 1024 * 1024) return { ok: false, error: 'That GIF is larger than 1 MB. Pick a smaller one.' };
+      const buf = fs.readFileSync(file);
+      fs.mkdirSync(dir, { recursive: true });
+      try { fs.unlinkSync(path.join(dir, 'logo.png')); } catch {}
+      fs.writeFileSync(path.join(dir, 'logo.gif'), buf);
+      return { ok: true, logo: 'data:image/gif;base64,' + buf.toString('base64') };
+    }
+    const img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return { ok: false, error: 'That file could not be read as an image.' };
+    const { width, height } = img.getSize();
+    const side = Math.min(width, height);
+    const png = img.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side }).resize({ width: 128, height: 128, quality: 'best' }).toPNG();
+    fs.mkdirSync(dir, { recursive: true });
+    try { fs.unlinkSync(path.join(dir, 'logo.gif')); } catch {}
+    fs.writeFileSync(path.join(dir, 'logo.png'), png);
+    return { ok: true, logo: 'data:image/png;base64,' + png.toString('base64') };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+ipcMain.handle('project:clear-logo', (_e, folder) => { for (const e of ['png', 'gif']) { try { fs.unlinkSync(path.join(logoDir(folder), 'logo.' + e)); } catch {} } return { ok: true }; });
+ipcMain.handle('agents:list', (_e, root) => agents.list(skillRoot(root)).map(({ file, ...a }) => a));
+ipcMain.handle('agents:save', (_e, a, root) => agents.save(a || {}, skillRoot(root)));
+ipcMain.handle('agents:delete', (_e, name, root) => agents.remove(name, skillRoot(root)));
+ipcMain.handle('agents:reveal', () => { fs.mkdirSync(agents.dir, { recursive: true }); shell.openPath(agents.dir); return true; });
+ipcMain.handle('agents:groups', () => { const { GROUPS, GROUP_LABELS } = require('./subagents'); return Object.keys(GROUPS).map((id) => ({ id, label: GROUP_LABELS[id] })); });
+
+// ---------- IPC: folders / files ----------
+ipcMain.handle('browser:open', (_e, url) => { if (!/^https?:\/\//i.test(String(url || ''))) return false; return showBrowser(String(url)); });
+ipcMain.handle('browser:close', () => { hideBrowser(); return true; });
+ipcMain.handle('browser:navigate', (_e, url) => { if (browserView && /^https?:\/\//i.test(String(url || ''))) { browserView.webContents.loadURL(String(url)); return true; } return false; });
+
+ipcMain.handle('import:chats', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Import chats (ChatGPT or Claude export)', properties: ['openFile'],
+    filters: [{ name: 'Chat export', extensions: ['zip', 'json'] }]
+  });
+  if (r.canceled || !r.filePaths[0]) return { canceled: true };
+  try {
+    const st = fs.statSync(r.filePaths[0]);
+    if (st.size > 1024 * 1024 * 1024) throw new Error('That file is too large.');
+    const { parseExport } = require('./importer');
+    const out = await parseExport(fs.readFileSync(r.filePaths[0]), getSettings().model);
+    return { ok: true, source: out.source, chats: out.chats, projects: out.projects || [], memory: out.memory || [] };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+});
+ipcMain.handle('dialog:folder', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle('files:pick', async (e) => {
+  const parent = BrowserWindow.fromWebContents(e.sender) || win;
+  const r = await dialog.showOpenDialog(parent, { properties: ['openFile', 'multiSelections'] });
+  if (r.canceled) return [];
+  return Promise.all(r.filePaths.map((p) => files.parseAttachment(p)));
+});
+ipcMain.handle('files:parse-buffer', (_e, name, bytes) => files.parseBuffer(name, bytes, app.getPath('temp')));
+ipcMain.handle('files:parse', (_e, paths) => Promise.all((paths || []).map((p) => files.parseAttachment(p))));
+ipcMain.handle('shell:open', (_e, p) => (p && fs.existsSync(p) ? shell.openPath(p) : null));
+
+// ---------- IPC: chat ----------
+const runs = new Map();       // requestId -> AbortController
+const approvals = new Map();  // toolId -> resolve(bool)
+
+ipcMain.handle('tool:decision', (_e, toolId, ok) => { decideTool(toolId, ok); });
+
+const memoryApi = (notify) => ({
+  list: () => readJson('memory', []),
+  add: (text) => {
+    const list = readJson('memory', []);
+    const item = { id: Math.random().toString(36).slice(2, 8), text: text.slice(0, 500), createdAt: Date.now() };
+    list.push(item); writeJson('memory', list); notify();
+    return item;
+  },
+  remove: (id) => {
+    const list = readJson('memory', []);
+    const next = list.filter((m) => m.id !== id);
+    if (next.length === list.length) return false;
+    writeJson('memory', next); notify();
+    return true;
+  }
+});
+
+// ---------- artifacts ----------
+const staged = new Map(); // token -> html
+const ARTIFACT_CSP = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; img-src data: blob: https:; font-src https: data:; media-src data: blob: https:; connect-src 'none'; frame-src 'none'; form-action 'none'";
+function artifactHtml(content, kind) {
+  if (kind === 'svg') return `<!doctype html><meta charset="utf-8"><body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff">${content}</body>`;
+  return /<html[\s>]|<!doctype/i.test(content) ? content : `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body>${content}</body>`;
+}
+ipcMain.handle('artifact:stage', (_e, content, kind) => {
+  const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  staged.set(token, artifactHtml(String(content || '').slice(0, 5e6), kind));
+  while (staged.size > 40) staged.delete(staged.keys().next().value);
+  return `artifact://view/${token}`;
+});
+ipcMain.handle('artifact:save', async (_e, { title, kind, language, content }) => {
+  if (kind === 'spreadsheet') {
+    const XLSX = require('xlsx');
+    const base = String(title || 'table').replace(/[^\w .-]+/g, '_').slice(0, 60);
+    const r = await dialog.showSaveDialog(win, { defaultPath: `${base}.xlsx`, filters: [{ name: 'Excel', extensions: ['xlsx'] }, { name: 'CSV', extensions: ['csv'] }, { name: 'Excel 97-2003', extensions: ['xls'] }, { name: 'OpenDocument', extensions: ['ods'] }] });
+    if (r.canceled || !r.filePath) return { canceled: true };
+    try {
+      const parts = /^## Sheet: /m.test(String(content || '')) ? String(content).split(/^## Sheet: /m).filter(Boolean) : [];
+      const secs = parts.length ? parts.map((p) => { const nl = p.indexOf('\n'); return { name: p.slice(0, nl < 0 ? p.length : nl).replace(/\s*\([^)]*\)\s*$/, '').trim() || 'Sheet', csv: nl < 0 ? '' : p.slice(nl + 1) }; }) : [{ name: 'Sheet1', csv: String(content || '') }];
+      const sheets = secs.map((s) => { const wb = XLSX.read(s.csv, { type: 'string' }); const ws = wb.Sheets[wb.SheetNames[0]]; return { name: s.name, rows: ws ? XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) : [] }; });
+      files.writeSpreadsheet(r.filePath, sheets);
+      return { ok: true, path: r.filePath };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
+  const ext = kind === 'html' ? 'html' : kind === 'svg' ? 'svg' : kind === 'markdown' ? 'md' : ({ python: 'py', javascript: 'js', typescript: 'ts', bash: 'sh', json: 'json', css: 'css', java: 'java', go: 'go', rust: 'rs' }[String(language).toLowerCase()] || 'txt');
+  const r = await dialog.showSaveDialog(win, { defaultPath: `${String(title || 'artifact').replace(/[^\w .-]+/g, '_').slice(0, 60)}.${ext}` });
+  if (r.canceled || !r.filePath) return { canceled: true };
+  fs.writeFileSync(r.filePath, String(content || ''));
+  return { ok: true, path: r.filePath };
+});
+
+// ---------- Sentinel widget (floating status, tray) ----------
+let sentinelInfo = { state: 'off' };
+let sentinelWidget = null;
+const sentinelOn = () => sentinelInfo.state && sentinelInfo.state !== 'off';
+function syncSentinel() {
+  if (!sentinelWidget) sentinelWidget = createSentinelWidget({ BrowserWindow, screen, isDev: IS_DEV, getPos: () => getSettings().sentinelPos, setPos: (p) => saveSettings({ sentinelPos: p }) });
+  if (sentinelOn() || sentinelInfo.err) { sentinelWidget.show(); sentinelWidget.send('sentinel:state', sentinelInfo); }
+  else sentinelWidget.hide();
+  try { rebuildTray && rebuildTray(); } catch {}
+}
+ipcMain.on('sentinel:state', (_e, info) => { sentinelInfo = info && typeof info === 'object' ? info : { state: 'off' }; syncSentinel(); });
+ipcMain.on('sentinel:level', (_e, v) => { sentinelWidget && sentinelWidget.send('sentinel:level', v); });
+ipcMain.on('sentinel:resize', (_e, h, wide) => { sentinelWidget && sentinelWidget.resize(h, wide); });
+ipcMain.handle('sentinel:current', () => sentinelInfo);
+ipcMain.handle('sentinel:action', (_e, a) => {
+  if (a === 'logs') showMain();
+  win?.webContents.send('sentinel:action', a);
+  return true;
+});
+
+// ---------- logs ----------
+ipcMain.handle('logs:get', (_e, n) => ({ entries: logger.recent(Number(n) || 1000), tasks: logger.tasks(), file: logger.file() }));
+ipcMain.handle('logs:clear', () => logger.clear());
+ipcMain.handle('logs:reveal', () => { try { fs.mkdirSync(logger.dir, { recursive: true }); fs.existsSync(logger.file()) ? shell.showItemInFolder(logger.file()) : shell.openPath(logger.dir); } catch {} return true; });
+ipcMain.handle('logs:add', (_e, o = {}) => { logger.log(o.level, 'ui:' + String(o.source || 'app').slice(0, 16), o.message, o.data); return true; });
+ipcMain.handle('logs:progress', (_e, o = {}) => { if (o.id) logger.progress(String(o.id).slice(0, 60), o.label, { pct: o.pct, state: o.state, detail: o.detail }); return true; });
+
+// ---------- voice ----------
+ipcMain.handle('voice:permission', async () => {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    const st = systemPreferences.getMediaAccessStatus('microphone');
+    if (st === 'not-determined') return (await systemPreferences.askForMediaAccess('microphone')) ? 'granted' : 'denied';
+    return st;
+  } catch { return 'granted'; }
+});
+/** Speech to text with the provider chosen in Settings → Voice. Used by the microphone, Sentinel, Telegram and the phone web chat. */
+const STT_LANG_OK = /^(en|english)/i; // English only
+async function transcribeAudio({ audio, mime, language, hint } = {}) {
+  try {
+    const settings = getSettings();
+    if (!settings.voiceSttProvider) return { ok: false, error: 'Pick a speech-to-text provider in Settings → Voice.' };
+    const route = providersLib.resolve(`prov:${settings.voiceSttProvider}:x`, readProviders(), getProviderKey);
+    if (route.error) return { ok: false, error: route.error };
+    const buf = Buffer.from(audio || []);
+    if (!buf.length) return { ok: false, error: 'Nothing was recorded.' };
+    if (buf.length > 24 * 1024 * 1024) return { ok: false, error: 'The recording is too long (limit about 24 MB). Try a shorter message.' };
+    const ext = /wav/.test(mime || '') ? 'wav' : /mp4|m4a|aac/.test(mime || '') ? 'mp4' : /mpeg|mp3/.test(mime || '') ? 'mp3' : /ogg|opus/.test(mime || '') ? 'ogg' : 'webm';
+    const fixed = /^en/i.test(String(language || settings.voiceLanguage || '')) ? 'en' : '';
+    const url = providersLib.joinUrl(route.baseUrl, 'audio/transcriptions');
+    // one request; verbose = also ask which language was heard
+    const once = async (lang, verbose, prompt) => {
+      const form = new FormData();
+      form.append('file', new Blob([buf], { type: mime || 'audio/webm' }), `speech.${ext}`);
+      form.append('model', settings.voiceSttModel || 'whisper-1');
+      form.append('response_format', verbose ? 'verbose_json' : 'json');
+      if (prompt) form.append('prompt', String(prompt).slice(0, 200));
+      if (lang) form.append('language', lang);
+      const tt = Date.now();
+      logger.info('voice', `Speech-to-text started (${Math.round(buf.length / 1024)} KB, ${ext})`, { model: settings.voiceSttModel || 'whisper-1', language: lang || 'auto' });
+      const res = await fetch(url, { method: 'POST', headers: { ...providersLib.headersFor(url), ...(route.key ? { authorization: `Bearer ${route.key}` } : {}) }, body: form, signal: AbortSignal.timeout(90000) });
+      logger.info('voice', `Speech-to-text answered HTTP ${res.status} in ${((Date.now() - tt) / 1000).toFixed(1)}s`);
+      const raw = await res.text();
+      let j = null; try { j = JSON.parse(raw); } catch {}
+      return { res, raw, j };
+    };
+    const fail = ({ res, raw, j }) => {
+      const detail = (j && (j.error && (j.error.message || j.error) || j.message)) || raw.slice(0, 200);
+      const h = res.status === 404 || res.status === 405 ? ' This endpoint does not support speech-to-text. Add OpenAI or Groq as a provider and choose it in Settings → Voice.' : res.status === 401 || res.status === 403 ? ' The key was rejected.' : '';
+      logger.error('voice', `Speech-to-text failed HTTP ${res.status}`, { detail });
+      return { ok: false, error: `Speech-to-text failed (HTTP ${res.status}): ${typeof detail === 'string' ? detail : JSON.stringify(detail)}.${h}` };
+    };
+    const done = (j) => { const text = String((j && j.text) ?? '').trim(); return text ? { ok: true, text } : { ok: false, error: 'No speech was recognised.' }; };
+    if (fixed) { const r = await once(fixed, false, hint); return r.res.ok ? done(r.j) : fail(r); }
+    // Automatic language: a short sentence can be taken for Icelandic or anything else. A prompt in the languages the user speaks
+    // steers it, and a result in some other language is redone as English.
+    const bias = `${hint || ''}Hello, how are you?`;
+    let r = await once('', true, bias);
+    if (!r.res.ok && r.res.status === 400) r = await once('', false, bias); // a server without verbose_json
+    if (!r.res.ok) return fail(r);
+    const heard = r.j && r.j.language;
+    if (heard && !STT_LANG_OK.test(String(heard))) {
+      logger.info('voice', `Heard "${heard}", which is not English: trying English`);
+      const score = (j) => { const sg = (j && j.segments) || []; return sg.length ? sg.reduce((a, x) => a + (Number(x.avg_logprob) || -3), 0) / sg.length : -3; };
+      const tries = [];
+      for (const l of ['en']) { try { const x = await once(l, true, hint); if (x.res.ok && x.j && String(x.j.text || '').trim()) tries.push(x.j); } catch {} }
+      if (tries.length) { tries.sort((a, b) => score(b) - score(a)); return done(tries[0]); }
+    }
+    return done(r.j);
+  } catch (e) { logger.error('voice', 'Speech-to-text failed: ' + ((e && e.message) || e)); return { ok: false, error: 'Speech-to-text failed: ' + ((e && e.message) || e) }; }
+}
+ipcMain.handle('voice:transcribe', (_e, a) => transcribeAudio(a || {}));
+
+// ---------- Text-to-speech from a local or custom server (Kokoro, Piper, OpenAI-compatible /audio/speech) ----------
+ipcMain.handle('voice:speak', async (_e, { text, speed, lang } = {}) => {
+  try {
+    const st = getSettings();
+    const engine = st.ttsEngine === 'piper' ? 'piper' : 'openai';
+    const base = String(st.ttsUrl || (engine === 'piper' ? 'http://localhost:5000' : 'http://localhost:8880')).trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(base)) return { ok: false, error: 'The voice server address must start with http:// or https://' };
+    const input = String(text || '').slice(0, 1500);
+    if (!input.trim()) return { ok: false, error: 'Nothing to read.' };
+    const rate = Math.min(1.6, Math.max(0.6, Number(speed) || 1));
+    const t0 = Date.now();
+    let res;
+    if (engine === 'piper') {
+      const body = { text: input, length_scale: Number((1 / rate).toFixed(2)) };
+      const pv = st.ttsVoiceEn || st.ttsVoice;
+      if (pv) body.voice = pv;
+      res = await fetch(base + '/synthesize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+    } else {
+      res = await fetch(providersLib.joinUrl(base, 'audio/speech'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: st.ttsModel || 'kokoro', input, voice: st.ttsVoice || 'af_heart', response_format: 'wav', speed: rate }), signal: AbortSignal.timeout(60000) });
+    }
+    if (!res.ok) { const t = (await res.text().catch(() => '')).slice(0, 200); logger.error('voice', `Text-to-speech failed HTTP ${res.status}`, { detail: t }); return { ok: false, error: `Voice server answered HTTP ${res.status}: ${t || res.statusText}` }; }
+    const buf = Buffer.from(await res.arrayBuffer());
+    logger.info('voice', `Text-to-speech ${engine}: ${Math.round(buf.length / 1024)} KB in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    return { ok: true, audio: new Uint8Array(buf), mime: res.headers.get('content-type') || 'audio/wav' };
+  } catch (e) {
+    const m = (e && e.cause && e.cause.code === 'ECONNREFUSED') ? 'The voice server is not running at that address.' : ((e && e.message) || String(e));
+    logger.error('voice', 'Text-to-speech failed: ' + m);
+    return { ok: false, error: m };
+  }
+});
+
+// ---------- Sentinel (wake phrase "Wake up", recognised offline on this computer) ----------
+const SENTINEL_MODEL_URLS = [
+  'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz'
+];
+const sentinelFile = () => path.join(app.getPath('home'), '.ares', 'models', 'vosk-small-en.tar.gz');
+const sentinelReady = () => { try { return fs.statSync(sentinelFile()).size > 5 * 1024 * 1024; } catch { return false; } };
+let sentinelBusy = false;
+ipcMain.handle('sentinel:status', () => {
+  let size = 0; try { size = fs.statSync(sentinelFile()).size; } catch {}
+  return { ready: sentinelReady(), size, path: sentinelFile() };
+});
+ipcMain.handle('sentinel:model', () => { try { return new Uint8Array(fs.readFileSync(sentinelFile())); } catch { return null; } });
+ipcMain.handle('sentinel:delete', () => { try { fs.unlinkSync(sentinelFile()); } catch {} return { ok: true }; });
+ipcMain.handle('sentinel:download', async (e) => {
+  if (sentinelReady()) return { ok: true };
+  if (sentinelBusy) return { ok: false, error: 'The voice model is already downloading.' };
+  sentinelBusy = true;
+  logger.info('sentinel', 'Downloading the voice model');
+  logger.progress('sentinel-download', 'Download voice model', { pct: 0, detail: 'Connecting…' });
+  const file = sentinelFile(); const tmp = file + '.part';
+  let lastErr = '';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    for (const url of SENTINEL_MODEL_URLS) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+        logger.info('sentinel', `Model server answered HTTP ${res.status}`, { url });
+        if (!res.ok || !res.body) { lastErr = `HTTP ${res.status}`; logger.error('sentinel', 'Model download failed: ' + lastErr, { url }); continue; }
+        const total = Number(res.headers.get('content-length')) || 0;
+        const out = fs.createWriteStream(tmp);
+        let got = 0; let last = 0;
+        const reader = res.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          got += value.length;
+          if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
+          const pct = total ? Math.round((got / total) * 100) : 0;
+          if (pct !== last) { last = pct; try { e.sender.send('sentinel:progress', pct); } catch {} logger.progress('sentinel-download', 'Download voice model', { pct, detail: `${(got / 1048576).toFixed(1)} of ${total ? (total / 1048576).toFixed(1) : '?'} MB` }); }
+        }
+        await new Promise((r, j) => out.end((err) => (err ? j(err) : r())));
+        if (got < 5 * 1024 * 1024) { lastErr = 'The download was incomplete.'; continue; }
+        fs.renameSync(tmp, file);
+        logger.progress('sentinel-download', 'Download voice model', { pct: 100, state: 'done', detail: `${(got / 1048576).toFixed(1)} MB saved` });
+        logger.info('sentinel', `Voice model downloaded (${(got / 1048576).toFixed(1)} MB)`);
+        return { ok: true };
+      } catch (err) { lastErr = (err && err.message) || String(err); logger.error('sentinel', 'Model download error: ' + lastErr); }
+    }
+    logger.progress('sentinel-download', 'Download voice model', { state: 'error', detail: lastErr });
+    try { fs.unlinkSync(tmp); } catch {}
+    return { ok: false, error: 'Could not download the voice model (' + lastErr + '). Check your internet connection and try again.' };
+  } finally { sentinelBusy = false; }
+});
+
+// ---------- Make.com ----------
+const make = createMake({ getAuth: () => ({ token: getSecret('makeToken'), zone: getSettings().makeZone }) });
+ipcMain.handle('make:save', (_e, { zone, token } = {}) => {
+  const z = cleanMakeZone(zone || getSettings().makeZone || MAKE_ZONES[0]);
+  if (!validMakeZone(z)) return { ok: false, error: 'The zone looks wrong. Use something like eu1.make.com (the address you see when you are logged in to Make).' };
+  saveSettings({ makeZone: z });
+  if (typeof token === 'string' && token.trim()) setSecret('makeToken', token.trim().replace(/^Token\s+/i, ''));
+  return { ok: true, zone: z, hasToken: !!getSecret('makeToken') };
+});
+ipcMain.handle('make:clear', () => { setSecret('makeToken', ''); return { ok: true }; });
+ipcMain.handle('make:test', async (_e, { zone, token } = {}) => {
+  const z = cleanMakeZone(zone || getSettings().makeZone);
+  const t = (typeof token === 'string' && token.trim().replace(/^Token\s+/i, '')) || getSecret('makeToken');
+  if (!validMakeZone(z)) return { ok: false, error: 'The zone looks wrong. Use something like eu1.make.com.' };
+  if (!t) return { ok: false, error: 'Paste your Make API token first.' };
+  try {
+    const tmp = createMake({ getAuth: () => ({ token: t, zone: z }) });
+    const orgs = await tmp.overview();
+    return { ok: true, orgs };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Automations page: the user's own Make scenarios. These are the user's own clicks, so they do not need the chat approval step.
+const makeReady = () => !!getSecret('makeToken');
+ipcMain.handle('make:scenarios', async () => {
+  if (!makeReady()) return { ok: false, notConnected: true, error: 'Make is not connected. Add your API token in Settings → Make.' };
+  try { return { ok: true, ...(await make.listAll()) }; } catch (e) { logger.error('make', 'Listing scenarios failed: ' + e.message); return { ok: false, error: e.message }; }
+});
+ipcMain.handle('make:toggle', async (_e, { id, active } = {}) => {
+  try { await make.actions.setActive({ id, active: !!active }); logger.info('make', `Scenario ${id} turned ${active ? 'on' : 'off'}`); return { ok: true }; } catch (e) { logger.error('make', 'Toggle failed: ' + e.message); return { ok: false, error: e.message }; }
+});
+ipcMain.handle('make:run', async (_e, { id } = {}) => {
+  try { await make.actions.run({ id }); logger.info('make', `Scenario ${id} started`); return { ok: true }; } catch (e) { logger.error('make', 'Run failed: ' + e.message); return { ok: false, error: e.message }; }
+});
+ipcMain.handle('make:logs', async (_e, { id } = {}) => {
+  try { return { ok: true, logs: await make.logs({ id, limit: 10 }) }; } catch (e) { return { ok: false, error: e.message }; }
+});
+
+const mediaDir = () => path.join(app.getPath('userData'), 'media');
+ipcMain.handle('media:load', (_e, file) => { try { return mediaGen.load(mediaDir(), file); } catch { return null; } });
+ipcMain.handle('media:reveal', (_e, file) => { try { mediaGen.load(mediaDir(), file); shell.showItemInFolder(file); } catch {} });
+
+/** Image/video generation through the providers picked in Settings → General (imageModel / videoModel = "prov:<provider>:<model>"). null when neither is set, so the tools stay hidden. */
+function mediaApi(settings, signal) {
+  const route = (id) => { const r = id ? providersLib.resolve(id, readProviders(), getProviderKey) : null; return r && !r.error ? r : null; };
+  if (!route(settings.imageModel) && !route(settings.videoModel)) return null;
+  const run = (kind, gen) => async (prompt, o = {}) => {
+    const id = o.model && /^prov:/.test(o.model) ? o.model : (kind === 'video' ? settings.videoModel : settings.imageModel);
+    const r = route(id);
+    if (!r) throw new Error(`No ${kind} model is set up. Add a provider and pick a ${kind} model in Settings → General.`);
+    const out = await gen({ baseUrl: r.baseUrl, key: r.key, dir: mediaDir(), signal: o.signal || signal, model: r.model, prompt, size: o.size, duration: o.duration });
+    return { ...out, model: r.model };
+  };
+  return { image: run('image', mediaGen.generateImage), video: run('video', mediaGen.generateVideo) };
+}
+
+
+// ---------- learning pass: after a multi-step task a cheap model decides whether it is worth saving as a skill ----------
+const learnLast = new Map(); // chat id -> time of the last proposal
+function cheapModel(fallback) {
+  const usable = readProviders().filter((p) => p.enabled !== false && p.baseUrl && (p.models || []).length && (!p.needsKey || getProviderKey(p.id)));
+  const small = /(\b|[-_:.])(8b|7b|9b|mini|small|nano|haiku|flash|instant|lite|oss-20b|30b-a3b|gemma)(\b|[-_:.])/i;
+  for (const p of usable) { const m = p.models.find((x) => small.test(x.id)); if (m) return `prov:${p.id}:${m.id}`; }
+  return fallback;
+}
+const LEARN_SYSTEM = `You review a task that was just finished and decide whether it is worth saving as a reusable skill. A skill is short, specific, step-by-step instructions for a kind of task the user is likely to ask for again.
+Be strict: most tasks are NOT worth saving (one-offs, simple questions, work already covered by an existing skill).
+Never include secrets, passwords, API keys, personal data, or one-time values (specific names, dates, ids). Write general steps.
+Answer in exactly one of these two formats and nothing else.
+Format 1 (not worth it):
+SAVE: no
+Format 2 (worth it):
+SAVE: yes
+MODE: create
+NAME: Short name
+DESCRIPTION: ONE line saying when to use this skill
+INSTRUCTIONS:
+<markdown steps, at most 25 lines>
+Use MODE: update only when the task clearly used or improved an existing skill from the list: NAME must then be exactly that skill's name and INSTRUCTIONS the COMPLETE improved text.`;
+async function learnFromRun({ settings, root, userText, toolLog, finalText, signal, send, myApprovals, chatId, model, route }) {
+  const chosen = settings.reflectModel ? liveModel(settings.reflectModel) : cheapModel(model);
+  let r = providersLib.resolve(chosen, readProviders(), getProviderKey);
+  if (r.error) r = route;
+  const trace = toolLog.slice(0, 30).map((t, i) => `${i + 1}. ${t.name}${t.args ? ' ' + JSON.stringify(t.args).replace(/\s+/g, ' ').slice(0, 140) : ''}`).join('\n');
+  const user = `Existing skills:\n${skills.indexText(root) || '(none)'}\n\nThe user asked:\n${String(userText).slice(0, 1500)}\n\nTools used, in order:\n${trace}\n\nThe final answer:\n${String(finalText).slice(0, 1500)}`;
+  const res = await fetch(providersLib.joinUrl(r.baseUrl, 'chat/completions'), {
+    method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]),
+    headers: { ...providersLib.headersFor(providersLib.joinUrl(r.baseUrl, 'chat/completions')), 'content-type': 'application/json', ...(r.key ? { authorization: `Bearer ${r.key}` } : {}) },
+    body: JSON.stringify({ model: r.model, stream: false, max_tokens: 1200, temperature: 0.3, ...providersLib.routingBody(providersLib.joinUrl(r.baseUrl, 'chat/completions')), messages: [{ role: 'system', content: LEARN_SYSTEM }, { role: 'user', content: user }] })
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  try { if (j.usage) recordUsage({ t: Date.now(), model: chosen, chat: chatId || '', project: '', source: 'learn', prompt: j.usage.prompt_tokens || 0, completion: j.usage.completion_tokens || 0, cached: 0, estimated: false }); } catch {}
+  const text = String((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '').replace(/^```\w*\n?|```$/gm, '').trim();
+  if (!/^\s*SAVE:\s*yes/i.test(text)) { logger.info('learn', 'Nothing worth saving from this task'); return; }
+  const field = (k) => { const m = new RegExp('^' + k + ':[ \\t]*(.+)$', 'im').exec(text); return m ? m[1].trim() : ''; };
+  const name = field('NAME'), description = field('DESCRIPTION');
+  const body = (/^INSTRUCTIONS:[ \t]*\n?([\s\S]+)$/im.exec(text) || [])[1];
+  const mode = /^update$/i.test(field('MODE')) && skills.find(name, root) ? 'update' : 'create';
+  if (!name || !description || !body || !body.trim()) { logger.info('learn', 'The model answered without a usable skill'); return; }
+  if (mode === 'create' && skills.find(name, root)) { logger.info('learn', `Skill "${name}" already exists`); return; }
+  const toolName = mode === 'update' ? 'update_skill' : 'create_skill';
+  const id = 'learn-' + Math.random().toString(36).slice(2, 8);
+  send({ type: 'tool:call', id, name: toolName, args: { name, description, instructions: body.trim() } });
+  const ok = await new Promise((resolve) => {
+    myApprovals.add(id); approvals.set(id, resolve);
+    send({ type: 'tool:approval', id, category: 'skill', summary: `${mode === 'update' ? 'Update' : 'Save new'} skill: ${name}` });
+    setTimeout(() => { if (approvals.get(id) === resolve) { approvals.delete(id); resolve(false); } }, 120000);
+  });
+  if (!ok) { send({ type: 'tool:result', id, ok: true, denied: true, text: 'Not saved.' }); return; }
+  const saved = skills.save({ name, description, body: body.trim(), scope: 'user', by: 'agent', mode }, root);
+  if (!saved.ok) { send({ type: 'tool:result', id, ok: false, text: saved.error }); return; }
+  send({ type: 'tool:result', id, ok: true, text: `${saved.updated ? 'Updated' : 'Saved'} skill "${saved.name}".` });
+  send({ type: 'notice', text: `${saved.updated ? 'Updated' : 'Saved new'} skill: ${saved.name}` });
+}
+
+// A model id that does not belong to a provider (an old default, Telegram's or Sentinel's model) moves to the first enabled provider.
+function liveModel(model) {
+  const m = String(model || '');
+  if (/^prov:/.test(m)) return model;
+  const usable = readProviders().filter((p) => p.enabled !== false && p.baseUrl && (p.models || []).length && (!p.needsKey || getProviderKey(p.id)));
+  const ok = usable.find((p) => p.needsKey && !p.local) || usable.find((p) => !p.local) || usable[0];
+  if (!ok) return model;
+  if (liveModel.last !== ok.id) { liveModel.last = ok.id; logger.info('chat', `Model "${m}" has no provider: using "${ok.name}" (${ok.models[0].id})`); }
+  return `prov:${ok.id}:${ok.models[0].id}`;
+}
+// Pictures the user attaches, saved to disk for providers that cannot take them inline (a proxy in front of the Claude CLI): the model gets the file path and opens it with artemis_view_image.
+const IMAGES_DIR = path.join(app.getPath('userData'), 'attachments');
+function stashImages(messages) {
+  return (messages || []).map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    const parts = m.content.map((c) => {
+      if (!c || c.type !== 'image_url') return c;
+      const url = c.image_url && c.image_url.url;
+      const mm = typeof url === 'string' ? /^data:image\/([a-z0-9+.-]+);base64,([\s\S]+)$/i.exec(url) : null;
+      if (mm) {
+        try {
+          const buf = Buffer.from(mm[2], 'base64');
+          const ext = { jpeg: 'jpg', jpg: 'jpg', png: 'png', gif: 'gif', webp: 'webp' }[mm[1].toLowerCase()] || 'png';
+          const file = path.join(IMAGES_DIR, `img-${require('crypto').createHash('sha1').update(buf).digest('hex').slice(0, 16)}.${ext}`);
+          fs.mkdirSync(IMAGES_DIR, { recursive: true });
+          if (!fs.existsSync(file)) fs.writeFileSync(file, buf);
+          return { type: 'text', text: `[Attached image: ${file}]` };
+        } catch {}
+      }
+      return { type: 'text', text: '[Attached image]' };
+    });
+    // this proxy turns a list of parts into the text "[object Object]": hand it plain text only
+    const flat = parts.every((c) => c && c.type === 'text');
+    return { ...m, content: flat ? parts.map((c) => c.text).join('\n\n') : parts };
+  });
+}
+async function executeRun({ requestId, model: model0, messages, project, system, maxTokens, send: rawSend, restrict, incognito, source, unattended, allowEdits, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort }) {
+  const model = liveModel(model0);
+  let usesFloat = false;
+  const t0 = Date.now();
+  const logEv = (ev) => {
+    const who = ev.agent && ev.agent.name ? `${ev.agent.name}: ` : '';
+    switch (ev.type) {
+      case 'error': logger.error('chat', ev.message || 'Error', { chat: chatId, model }); break;
+      case 'notice': logger.warn('chat', ev.text); break;
+      case 'tool:call': logger.info('tool', `${who}${ev.name}`, ev.args); break;
+      case 'tool:result': (ev.ok ? logger.info : logger.warn)('tool', `${who}${ev.denied ? 'denied' : ev.ok ? 'ok' : 'failed'}: ${String(ev.text || '').replace(/\s+/g, ' ').slice(0, 160)}`); break;
+      case 'tool:approval': logger.info('approval', `${ev.agent ? (ev.agent.name || ev.agent) + ' · ' : ''}${ev.summary || ev.category}`); break;
+      case 'agent:start': logger.info('agent', `${(ev.agent && ev.agent.name) || ev.name || 'agent'} started`, { task: ev.task }); break;
+      case 'agent:done': logger.info('agent', `${(ev.agent && ev.agent.name) || ev.name || 'agent'} finished`); break;
+      case 'council': logger.info('council', `Answerer: ${ev.verdict && ev.verdict.answerer} (${ev.verdict && ev.verdict.voters} voters)`, { votes: ev.votes, verdict: ev.verdict }); break;
+      case 'brain': logger.info('council', `Brain: ${ev.name}${ev.model ? ' · ' + ev.model : ''}`); break;
+      case 'done': logger.info('chat', `Run finished in ${((Date.now() - t0) / 1000).toFixed(1)}s`, { chat: chatId }); break;
+      default:
+    }
+  };
+  // A chat that Telegram is continuing: what you type here and the answer also go to Telegram.
+  const mirror = (!incognito && !unattended && source !== 'phone' && source !== 'schedule' && chatId && typeof remote !== 'undefined' && remote && remote.mirrorTarget) ? (() => { try { return remote.mirrorTarget(chatId); } catch { return null; } })() : null;
+  const mSteps = [''];
+  const userText = (() => { const m = Array.isArray(messages) ? messages[messages.length - 1] : null; const c = m && m.content; return (typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join(' ')).trim(); })();
+  if (mirror && userText) mirror.send('💻 ' + userText).catch(() => {});
+  const toolLog = []; let lastText = '', hadError = false;
+  const send = (ev) => {
+    try { logEv(ev); } catch {}
+    if (ev.type === 'tool:call') toolLog.push({ name: ev.name, args: ev.args });
+    else if (ev.type === 'step:new') lastText = '';
+    else if (ev.type === 'chunk' && !ev.agent) lastText += ev.text;
+    else if (ev.type === 'error') hadError = true;
+    if (mirror) { if (ev.type === 'chunk' && !ev.agent) mSteps[mSteps.length - 1] += ev.text; else if (ev.type === 'step:new') mSteps.push(''); }
+    rawSend(ev); if (usesFloat && floater?.isOpen()) floater.send(ev);
+  };
+  logger.info('chat', `Run started · ${model}${brain ? ' · brain: ' + brain : ''}${source ? ' · ' + source : ''}`, { chat: chatId, messages: Array.isArray(messages) ? messages.length : 0, incognito: !!incognito });
+  const settings = getSettings();
+  const route = providersLib.resolve(model, readProviders(), getProviderKey);
+  if (route.error) { send({ type: 'error', message: route.error }); send({ type: 'done' }); return; }
+  const key = route.key;
+  const controller = new AbortController();
+  runs.set(requestId, controller);
+  const myApprovals = new Set();
+  controller.signal.addEventListener('abort', () => { for (const id of myApprovals) { const r = approvals.get(id); if (r) { approvals.delete(id); r(false); } } }, { once: true }); // Stop while a tool waits for approval: decline it so the run can end
+  // per-chat switch: 'on' / 'off' overrides the global "Let Artemis use agents" setting
+  const useAgents = agentsMode === 'on' ? true : agentsMode === 'off' ? false : settings.delegateEnabled !== false;
+  const perm = ['ask', 'edits', 'auto'].includes(permMode) ? permMode : (settings.autoApproveEdits ? 'edits' : 'ask');
+  const root = project?.folder && fs.existsSync(project.folder) ? project.folder : null;
+  const fileRoot = root || defaultFilesDir();
+
+  const lim0 = limitState();
+  if (lim0.blocked) { send({ type: 'error', message: lim0.blocked }); send({ type: 'done' }); runs.delete(requestId); return; }
+  if (lim0.warn) send({ type: 'notice', text: lim0.warn });
+
+  try {
+    // Brains: talk as one personality, or let the council vote on who answers and what to use.
+    let persona = ''; let runRoute = route; let personaModel = model;
+    const sel = brain !== undefined && brain !== null ? String(brain) : String(settings.defaultBrain || '');
+    const wanted = unattended && sel === 'council' ? '' : sel;
+    if (wanted) {
+      const resolveFor = (id) => providersLib.resolve(id || model, readProviders(), getProviderKey);
+      const brainUsage = (u) => { if (!incognito) recordUsage({ t: Date.now(), model: u.model, chat: chatId || '', project: project?.name || '', source: 'council', prompt: u.prompt, completion: u.completion, cached: 0, estimated: u.estimated }); };
+      let chosen = null; let hint = '';
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+      const lastText = lastUser ? (typeof lastUser.content === 'string' ? lastUser.content : Array.isArray(lastUser.content) ? lastUser.content.map((p) => p.text || '').join(' ') : '') : '';
+      const stuck = wanted === 'council' && !revote && brainPick ? brains.find(brainPick) : null;
+      if (stuck) { chosen = stuck; send({ type: 'notice', text: `Council: ${stuck.name} keeps answering. Use "Re-vote" to ask the council again.` }); }
+      else if (wanted === 'council' && lastText.trim().split(/\s+/).length <= 3 && !(brainPick)) { chosen = brains.list()[0]; }
+      else if (wanted === 'council') {
+        const all = brains.list();
+        let spent = 0;
+        const tail = messages.slice(-4).map((m) => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${(typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.map((p) => p.text || '').join(' ') : '').slice(0, 1200)}`).filter((l) => l.length > 12).join('\n');
+        send({ type: 'council:start' });
+        const out = await brainsLib.deliberate({
+          brains: all, conversation: tail,
+          skillsIndex: settings.skillsEnabled !== false ? skills.indexText(root) : '', agentsIndex: useAgents ? agents.indexText(root) : '',
+          call: async (b, sys, user) => {
+            const r = resolveFor(b.model);
+            if (r.error) throw new Error(r.error);
+            return brainsLib.askJson({ url: providersLib.joinUrl(r.baseUrl, 'chat/completions'), key: r.key, model: r.model, system: sys, user, signal: controller.signal, onUsage: (u) => { spent += (u.prompt || 0) + (u.completion || 0); brainUsage({ ...u, model: b.model || model }); } });
+          }
+        });
+        send({ type: 'council', votes: out.votes, verdict: out.verdict, tokens: spent });
+        chosen = all.find((b) => b.name === out.verdict.answerer) || all[0];
+        hint = brainsLib.verdictHint(out.verdict);
+      } else chosen = brains.find(wanted);
+      if (chosen) {
+        persona = brainsLib.personaText(chosen) + (hint ? '\n\n' + hint : '');
+        send({ type: 'brain', name: chosen.name, role: chosen.role, slug: chosen.slug, model: chosen.model || '', council: wanted === 'council' });
+        if (chosen.model) {
+          const r = resolveFor(chosen.model);
+          if (r.error) send({ type: 'notice', text: `${chosen.name}'s model is not available (${r.error}) so the chat model was used.` });
+          else { runRoute = r; personaModel = chosen.model; }
+        }
+      }
+    }
+    await runAgent({
+      persona, sessionId: chatId || undefined,
+      baseUrl: runRoute.baseUrl, key: runRoute.key, model: runRoute.model, noToolCalls: !!runRoute.noTools, messages: runRoute.noTools ? stashImages(messages) : messages, maxTokens: maxTokens || settings.maxTokens, reasoningEffort: effort === 'auto' ? '' : (effort || settings.reasoningEffort || ''),
+      custom: system, personality: require('./personality').text(settings), userName: settings.profileName || '', userAbout: settings.profileAbout || '', userLocation: settings.profileLocation || '', project, root: fileRoot, defaultRoot: !root,
+      webEnabled: settings.webEnabled, shellEnabled: settings.shellEnabled && !restrict,
+      computer: settings.computerEnabled && !restrict && process.platform === 'darwin' ? computer : null,
+      schedule: unattended || restrict ? null : { list: () => scheduler.list(), save: (j) => scheduler.save({ ...j, projectId: j.projectId !== undefined ? j.projectId : (project?.id || null) }), remove: (id) => scheduler.remove(id) },
+      notes: settings.notesAi !== false ? notesStore : null,
+      term: settings.shellEnabled && !restrict && !unattended && process.platform !== 'win32' ? termApi : null,
+      phone: remote?.phone() || null, media: mediaApi(settings, controller.signal), mcp: settings.connectorsEnabled === false ? null : mcp, mcpLazy: settings.connectorsLazy !== false, fullFileAccess: settings.fullFileAccess !== false, lazyTools: settings.toolsLazy !== false,
+      skills: settings.skillsEnabled !== false ? { index: () => skills.indexText(root), get: (n) => skills.get(n, root), save: (o) => skills.save(o, root) } : null,
+      autoLearn: settings.autoLearn !== false && !incognito && !unattended,
+      chats: settings.chatSearchEnabled !== false && !incognito ? chatsApi() : null,
+      delegateEnabled: useAgents,
+      agents: { find: (n) => agents.find(n, root), list: () => agents.list(root), index: () => agents.indexText(root) },
+      resolveModel: (id) => providersLib.resolve(id, readProviders(), getProviderKey),
+      usageModel: personaModel,
+      make: settings.makeEnabled !== false && getSecret('makeToken') ? make : null,
+      computerHooks: {
+        onStart: () => {
+          usesFloat = true;
+          if (++computerRuns > 1) { floater?.open(); return; }
+          try { new Notification({ title: 'Artemis is controlling your computer', body: 'Press Cmd/Ctrl+Shift+Esc to stop.' }).show(); } catch {}
+          try { globalShortcut.register('CommandOrControl+Shift+Escape', stopAll); } catch {}
+          floater?.open();
+          quick?.hide();
+          if (win && !win.isDestroyed()) win.minimize();
+        },
+        onEnd: () => {
+          usesFloat = false;
+          if (--computerRuns > 0) return;
+          try { globalShortcut.unregister('CommandOrControl+Shift+Escape'); } catch {}
+          setTimeout(() => { if (computerRuns === 0) floater?.close(); }, 600);
+          if (win && !win.isDestroyed()) { win.restore(); win.show(); }
+        }
+      },
+      shouldStop: () => limitState().blocked,
+      runTokenBudget: Number(settings.runTokenBudget) || undefined, contextTokens: Number(settings.contextTokens) || undefined,
+      toolsEnabled: toolsMode === 'on' ? true : toolsMode === 'off' ? false : settings.toolsEnabled, memoryEnabled: settings.memoryEnabled && !incognito, incognito: !!incognito,
+      onUsage: incognito ? null : (u) => recordUsage({ t: Date.now(), model: u.model || model, chat: chatId || '', project: project?.name || '', source: source || 'app', prompt: u.prompt, completion: u.completion, cached: u.cached || 0, estimated: u.estimated }),
+      autoApprove: unattended ? !!allowEdits : perm !== 'ask',
+      autoAll: !unattended && perm === 'auto',
+      agentAutoApprove: !unattended && (perm === 'auto' || (perm === 'edits' && settings.agentWriteApproval === false)),
+      memoryApi: memoryApi(() => send({ type: 'memory:changed' })),
+      approve: (info) => unattended ? Promise.resolve(info.category === 'phone') : new Promise((resolve) => {
+        myApprovals.add(info.id);
+        approvals.set(info.id, resolve);
+        send({ type: 'tool:approval', id: info.id, category: info.category, session: !!info.session, summary: info.summary, agent: info.agent });
+      }),
+      send, signal: controller.signal
+    });
+    // Learning pass: only for ordinary app chats, after a real multi-step task, never when a skill was already saved in it.
+    try {
+      const work = toolLog.filter((t) => !/^(use_skill|create_skill|update_skill|memory_|search_chats|notes_search)/.test(t.name));
+      const toolsOn = toolsMode === 'on' ? true : toolsMode === 'off' ? false : settings.toolsEnabled;
+      if (settings.skillsEnabled !== false && settings.autoLearn !== false && toolsOn && !incognito && !unattended && !restrict && !source && !hadError && !controller.signal.aborted
+        && work.length >= 3 && !toolLog.some((t) => /^(create|update)_skill$/.test(t.name)) && Date.now() - (learnLast.get(chatId || '') || 0) > 10 * 60 * 1000) {
+        learnLast.set(chatId || '', Date.now());
+        await learnFromRun({ settings, root, userText, toolLog, finalText: lastText, signal: controller.signal, send, myApprovals, chatId, model, route });
+      }
+    } catch (e) { if (e && e.name !== 'AbortError') logger.warn('learn', 'Learning pass failed: ' + ((e && e.message) || e)); }
+  } catch (err) {
+    if (err.name !== 'AbortError') send({ type: 'error', message: err.message || String(err) });
+  } finally {
+    for (const id of myApprovals) { const r = approvals.get(id); if (r) { approvals.delete(id); r(false); } }
+    runs.delete(requestId);
+    if (mirror) { const final = mSteps.filter(Boolean).join('\n\n').trim(); if (final) { mirror.addTurn(userText, final); mirror.send(final).catch(() => {}); } }
+    send({ type: 'done' });
+  }
+}
+
+ipcMain.handle('chat:run', (e, { requestId, model, messages, project, system, maxTokens, incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort }) => {
+  const wc = e.sender;
+  const send = (ev) => { if (!wc.isDestroyed()) wc.send('chat:event', { requestId, ...ev }); };
+  return executeRun({ requestId, model, messages, project, system, maxTokens, send, incognito: !!incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort });
+});
+ipcMain.handle('chat:compact', (_e, o = {}) => compactSummary(o));
+async function compactSummary({ model, messages, chatId, incognito } = {}) {
+  try {
+    const settings = getSettings();
+    const m = liveModel(model || settings.model);
+    const route = providersLib.resolve(m, readProviders(), getProviderKey);
+    if (route.error) return { ok: false, error: route.error };
+    if (!Array.isArray(messages) || !messages.length) return { ok: false, error: 'Nothing to compact.' };
+    const summary = await summarizeAll(messages, {
+      url: providersLib.joinUrl(route.baseUrl, 'chat/completions'), key: route.key, model: route.model, signal: AbortSignal.timeout(120000),
+      onUsage: incognito ? null : (u) => recordUsage({ t: Date.now(), model: m, chat: chatId || '', project: '', source: 'compact', prompt: u.prompt, completion: u.completion, cached: 0, estimated: u.estimated })
+    });
+    return { ok: true, summary };
+  } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+}
+ipcMain.handle('chat:abort', (_e, requestId) => { runs.get(requestId)?.abort(); });
+function stopAll() { for (const c of runs.values()) c.abort(); }
+ipcMain.handle('float:stop', () => stopAll());
+let computer = null;
+let floater = null;
+let computerRuns = 0;
+let remote = null;
+
+// ---------- tray, quick chat, shortcuts ----------
+function showMain() {
+  if (!win || win.isDestroyed()) createWindow();
+  if (win.isMinimized()) win.restore();
+  const mac = process.platform === 'darwin';
+  // show on the current Space (even over a fullscreen app) instead of jumping back to the window's old Space
+  if (mac) { try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true }); } catch {} }
+  win.show(); win.focus();
+  try { app.focus({ steal: true }); } catch {} // otherwise macOS can leave the window behind the app that was in front
+  if (mac) setTimeout(() => { try { if (win && !win.isDestroyed()) win.setVisibleOnAllWorkspaces(false, { skipTransformProcessType: true }); } catch {} }, 300);
+  quick?.hide();
+}
+
+let registeredAccel = '';
+let registeredPalette = '';
+let paletteSnap = { chats: [], actions: [] }; // last chats and actions the main window sent; the palette window shows them
+function openPalette() {
+  // a small floating window over whatever app is in front; picking something brings Artemis up and runs it there
+  palette?.toggle();
+}
+ipcMain.handle('palette:sync', (_e, snap) => { paletteSnap = { chats: Array.isArray(snap?.chats) ? snap.chats : [], actions: Array.isArray(snap?.actions) ? snap.actions : [] }; });
+ipcMain.handle('palette:get', () => paletteSnap);
+ipcMain.handle('palette:hide', () => palette?.hide());
+ipcMain.handle('palette:run', (_e, item) => {
+  palette?.hide();
+  const fresh = !win || win.isDestroyed();
+  showMain();
+  const send = () => { try { win.webContents.send('palette:run', item); } catch {} };
+  if (fresh || win.webContents.isLoading()) win.webContents.once('did-finish-load', () => setTimeout(send, 400)); else send();
+});
+function applyShortcut() {
+  shortcutError = '';
+  if (registeredAccel) { try { globalShortcut.unregister(registeredAccel); } catch {} registeredAccel = ''; }
+  if (registeredPalette) { try { globalShortcut.unregister(registeredPalette); } catch {} registeredPalette = ''; }
+  const accel = String(getSettings().quickChatShortcut || '').trim();
+  if (accel) {
+    try {
+      if (globalShortcut.register(accel, () => quick.toggle())) registeredAccel = accel;
+      else shortcutError = `Could not register "${accel}". Another app may be using it.`;
+    } catch (e) { shortcutError = `Invalid shortcut "${accel}". Example: CommandOrControl+Shift+Space`; }
+  }
+  const pal = String(getSettings().paletteShortcut || '').trim();
+  if (pal && pal !== accel) {
+    try {
+      if (globalShortcut.register(pal, openPalette)) registeredPalette = pal;
+      else shortcutError = (shortcutError ? shortcutError + ' ' : '') + `Could not register "${pal}". Another app may be using it.`;
+    } catch (e) { shortcutError = (shortcutError ? shortcutError + ' ' : '') + `Invalid shortcut "${pal}".`; }
+  }
+}
+
+function applyLoginItem() {
+  // macOS refuses this for the unsigned dev build (prints "Operation not permitted"), so only the installed app sets it.
+  if (!app.isPackaged) return;
+  try { app.setLoginItemSettings({ openAtLogin: !!getSettings().launchAtLogin }); } catch (e) { logger.warn('app', 'Could not change the launch-at-login setting: ' + ((e && e.message) || e)); }
+}
+
+let rebuildTray = null;
+function createTray() {
+  const dir = path.join(__dirname, 'assets');
+  const mac = process.platform === 'darwin';
+  // nativeImage cannot read SVG; use PNG (on macOS as a template image: fits light/dark menu bars, @2x is automatic)
+  let img = nativeImage.createFromPath(path.join(dir, mac ? 'trayTemplate.png' : 'tray.png'));
+  if (img.isEmpty()) img = nativeImage.createFromPath(path.join(dir, 'tray.png')).resize({ width: 18, height: 18 });
+  if (mac) img.setTemplateImage(true);
+  tray = new Tray(img);
+  tray.setToolTip('Artemis');
+  const menu = () => Menu.buildFromTemplate([
+    { label: 'Quick chat', accelerator: getSettings().quickChatShortcut || undefined, registerAccelerator: false, click: () => quick.show() },
+    { label: 'Open Artemis', click: showMain },
+    { label: 'New chat', click: () => { showMain(); win?.webContents.send('menu', 'new-chat'); } },
+    { type: 'separator' },
+    { label: sentinelOn() ? 'Turn Sentinel off' : 'Turn Sentinel on (say "Wake up")', click: () => win?.webContents.send('sentinel:action', 'toggle') },
+    { label: 'Stop all running tasks', click: () => stopAll() },
+    { type: 'separator' },
+    { label: 'Quit Artemis', click: () => { quitting = true; app.quit(); } }
+  ]);
+  rebuildTray = () => { try { if (process.platform === 'linux') tray.setContextMenu(menu()); tray.setToolTip(sentinelOn() ? 'Artemis · Sentinel is listening' : 'Artemis'); } catch {} };
+  if (process.platform === 'linux') tray.setContextMenu(menu());
+  else {
+    tray.on('click', () => quick.toggle());
+    tray.on('right-click', () => tray.popUpContextMenu(menu()));
+  }
+}
+
+ipcMain.handle('quick:resize', (_e, mode) => quick?.resize(mode === 'chips' ? 'chips' : !!mode));
+ipcMain.handle('quick:hide', () => quick?.hide());
+ipcMain.handle('quick:keep-open', (_e, on) => quick?.keepOpen(!!on));
+ipcMain.handle('quick:handoff', (_e, chat) => {
+  showMain();
+  const send = () => win?.webContents.send('quick:import', chat);
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
+});
+
+// ---------- connectors (MCP) ----------
+const readMcpList = () => readJson('mcp', []);
+ipcMain.handle('mcp:status', () => mcp.status(readMcpList()));
+ipcMain.handle('mcp:list', () => readMcpList());
+ipcMain.handle('mcp:save', async (_e, list) => {
+  const clean = (Array.isArray(list) ? list : []).map((c) => ({
+    id: String(c.id || Math.random().toString(36).slice(2, 10)), name: String(c.name || 'server').slice(0, 60), type: c.type === 'http' ? 'http' : 'stdio',
+    command: String(c.command || ''), args: Array.isArray(c.args) ? c.args.map(String) : [], env: c.env && typeof c.env === 'object' ? c.env : {},
+    url: String(c.url || ''), headers: c.headers && typeof c.headers === 'object' ? c.headers : {}, oauth: c.oauth && typeof c.oauth === 'object' ? c.oauth : undefined,
+    authorizationUrl: String(c.authorizationUrl || ''), tokenUrl: String(c.tokenUrl || ''), clientId: String(c.clientId || ''), clientSecret: String(c.clientSecret || ''), scope: String(c.scope || ''), enabled: c.enabled !== false
+  }));
+  writeJson('mcp', clean);
+  await mcp.configure(clean);
+  return mcp.status(clean);
+});
+ipcMain.handle('mcp:oauth-start', async (_e, cfg) => {
+  try {
+    if (!cfg?.authorizationUrl || !cfg?.tokenUrl) throw new Error('Authorization URL and token URL are required.');
+    const state = crypto.randomBytes(24).toString('hex');
+    const redirectUri = `http://127.0.0.1:${oauthCallbackServer.address().port}/callback`;
+    const params = new URLSearchParams({ response_type: 'code', client_id: cfg.clientId || '', redirect_uri: redirectUri, state, ...(cfg.scope ? { scope: cfg.scope } : {}) });
+    shell.openExternal(`${cfg.authorizationUrl}${cfg.authorizationUrl.includes('?') ? '&' : '?'}${params.toString()}`);
+    const result = await new Promise((resolve, reject) => { oauthPending.set(state, { resolve, reject }); setTimeout(() => { if (oauthPending.delete(state)) reject(new Error('OAuth timed out.')); }, 180000); });
+    const body = new URLSearchParams({ grant_type: 'authorization_code', code: result.code, client_id: cfg.clientId || '', redirect_uri: redirectUri, ...(cfg.clientSecret ? { client_secret: cfg.clientSecret } : {}) });
+    const tokenRes = await fetch(cfg.tokenUrl, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body });
+    const token = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !token.access_token) throw new Error(token.error_description || token.error || `Token request failed (${tokenRes.status})`);
+    return { ok: true, oauth: { accessToken: token.access_token, refreshToken: token.refresh_token || '', expiresAt: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : 0 } };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+});
+ipcMain.handle('mcp:oauth-callback-url', () => `http://127.0.0.1:${oauthCallbackServer.address().port}/callback`);
+ipcMain.handle('mcp:oauth-open', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); return true; });
+ipcMain.handle('mcp:import', (_e, text) => { try { return { ok: true, servers: parseImport(String(text)) }; } catch (e) { return { ok: false, error: e.message }; } });
+
+const decideTool = (id, ok) => { const r = approvals.get(id); if (r) { approvals.delete(id); r(!!ok); } };
+ipcMain.handle('remote:status', () => remote.status());
+ipcMain.handle('remote:connect-telegram', (_e, token) => remote.connectTelegram(token));
+ipcMain.handle('remote:unpair', () => { remote.unpair(); return remote.status(); });
+ipcMain.handle('shell:reveal', (_e, p) => { if (p && fs.existsSync(p)) shell.showItemInFolder(p); });
+ipcMain.handle('phone:send-file', async (_e, p) => {
+  const phone = remote.phone();
+  if (!phone) return { ok: false, error: 'No phone paired. Pair Telegram in Settings → Phone.' };
+  if (!p || !fs.existsSync(p) || !fs.statSync(p).isFile()) return { ok: false, error: 'File not found.' };
+  try { await phone.sendFile(p, path.basename(p)); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('sheet:load', (_e, p) => { try { return { ok: true, ...files.loadSheets(p) }; } catch (e) { return { ok: false, error: e.message }; } });
+ipcMain.handle('sheet:save', (_e, p, sheets, opts) => { try { return { ok: true, ...files.saveSheets(p, sheets, opts || {}) }; } catch (e) { return { ok: false, error: e.message }; } });
+ipcMain.handle('sheet:save-as', async (e, sheets, suggested, opts) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const r = await dialog.showSaveDialog(win, { defaultPath: suggested || 'table.xlsx', filters: [{ name: 'Spreadsheet', extensions: ['xlsx', 'csv', 'tsv', 'xls', 'xlsb', 'ods'] }] });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  try { return { ok: true, path: r.filePath, ...files.saveSheets(r.filePath, sheets, { ...(opts || {}), backup: false }) }; } catch (err) { return { ok: false, error: err.message }; }
+});
+function defaultFilesDir() { const docs = app.getPath('documents'); const old = path.join(docs, 'Artemis'); const d = fs.existsSync(old) ? old : path.join(docs, 'Artemis'); try { fs.mkdirSync(d, { recursive: true }); } catch {} return d; }
+ipcMain.handle('files:default-folder', () => defaultFilesDir());
+ipcMain.handle('files:preview-project', async (_e, folder, rel) => {
+  try { return await files.parseAttachment(tools.resolveSafe(folder, rel), 400000); } catch (e) { return { name: String(rel), kind: 'error', error: e.message }; }
+});
+
+
+// ---------- scheduled tasks ----------
+const toWinSafe = (ch, p) => { try { if (win && !win.isDestroyed()) win.webContents.send(ch, p); } catch {} };
+async function runScheduled(job) {
+  const st = getSettings();
+  const requestId = 'sch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  const proj = job.projectId ? (readJson('projects', []).find((p) => p.id === job.projectId) || null) : null;
+  const project = proj ? { name: proj.name, instructions: proj.instructions, ...(proj.folder && fs.existsSync(proj.folder) ? { folder: proj.folder } : {}) } : null;
+  const model = job.model || st.model;
+  let text = '', error = '';
+  toWinSafe('schedule:start', { requestId, jobId: job.id, name: job.name, prompt: job.prompt, model, projectId: job.projectId || null });
+  const send = (ev) => {
+    if (ev.type === 'step:new') text = '';
+    if (ev.type === 'chunk') text += ev.text;
+    if (ev.type === 'error') error = ev.message;
+    toWinSafe('chat:event', { ...ev, requestId });
+  };
+  // A job marked as a plain reminder is just delivered: no model runs. Every other job is a task for the AI.
+  if (job.reminder) {
+    text = String(job.prompt || '').trim();
+    send({ type: 'chunk', text }); send({ type: 'done' });
+  } else await executeRun({ requestId, messages: [{ role: 'user', content: job.prompt }], send, restrict: true, source: 'schedule', unattended: true, allowEdits: job.allowEdits,
+    model, system: (st.systemPrompt || '') + '\n\nThis is a scheduled task and it is running right now. Do it directly and report the result. The task text is an instruction for you, even when it reads like a message to the user: carry it out (for a reminder, state the reminder to the user) and never reply to it as if it were a chat message. Nobody is there to answer: never ask questions, never ask which method to use, and do not write notes or files unless the task says so. If the task is only a reminder, state the reminder. send_to_phone (Telegram) works in scheduled tasks without asking: use it when the task says to send something to the phone.', maxTokens: st.maxTokens, project });
+  const summary = (error ? `Failed: ${error}` : text.trim() || 'Finished.').slice(0, 600);
+  try { if (Notification.isSupported()) { const n = new Notification({ title: job.name, body: summary.slice(0, 160) }); n.on('click', showMain); n.show(); } } catch {}
+  if (job.notifyPhone) {
+    try {
+      const ph = remote && remote.phone();
+      if (ph) await ph.send(`⏰ ${job.name}\n\n${summary}`);
+      else logger.warn('app', 'A scheduled task should be sent to the phone, but Telegram is not connected and paired', { job: job.name });
+    } catch (e) { logger.error('app', 'Sending a scheduled task result to Telegram failed: ' + ((e && e.message) || e), { job: job.name }); }
+  }
+  return error ? { ok: false, error } : { ok: true };
+}
+const scheduler = createScheduler({
+  read: () => readJson('schedules', []), write: (l) => writeJson('schedules', l),
+  changed: () => toWinSafe('schedule:changed', {}), run: (job) => runScheduled(job)
+});
+ipcMain.handle('schedule:list', () => scheduler.list());
+ipcMain.handle('schedule:save', (_e, job) => { try { return { ok: true, job: scheduler.save(job) }; } catch (e) { return { ok: false, error: e.message }; } });
+ipcMain.handle('schedule:toggle', (_e, id, enabled) => { scheduler.toggle(id, !!enabled); return true; });
+ipcMain.handle('schedule:delete', (_e, id) => { scheduler.remove(id); return true; });
+ipcMain.handle('schedule:run', (_e, id) => { scheduler.runNow(id); return true; });
+
+// ---------- built-in terminal ----------
+const { createTerminals } = require('./terminal');
+const termLast = new Map(); // session id -> time of last output
+const terminals = createTerminals({
+  emit: (ch, p) => { if (ch === 'term:data' && p) termLast.set(p.id, Date.now()); for (const w of BrowserWindow.getAllWindows()) { try { if (!w.isDestroyed()) w.webContents.send(ch, p); } catch {} } },
+  defaultCwd: () => app.getPath('home')
+});
+const termWindows = new Map(); // session id -> its own window
+
+// The agent shares one visible terminal session with the user (opened on demand, shown as a dock tab).
+let agentTerm = null;
+const stripAnsi = (t) => String(t).replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r(?!\n)/g, '');
+const tailLines = (id, n) => { const sn = terminals.snapshot(id); if (!sn.ok) return ''; const l = stripAnsi(sn.data).split('\n'); return l.slice(-n).join('\n').trim(); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function ensureAgentTerm() {
+  if (agentTerm) { const sn = terminals.snapshot(agentTerm); if (sn.ok && !sn.exited) return agentTerm; }
+  const r = terminals.open({ cols: 120, rows: 32, cwd: undefined });
+  if (!r.ok) throw new Error(r.error || 'Could not start the terminal.');
+  agentTerm = r.id;
+  if (win && !win.isDestroyed()) { win.show(); win.webContents.send('term:docked', { id: r.id }); }
+  return r.id;
+}
+const termApi = {
+  async run(text, waitMs) {
+    const id = ensureAgentTerm();
+    await sleep(agentTerm && !terminals.snapshot(id).data ? 700 : 0);
+    termLast.set(id, Date.now());
+    terminals.input(id, text);
+    const t0 = Date.now();
+    await sleep(350);
+    while (Date.now() - t0 < waitMs && Date.now() - (termLast.get(id) || 0) < 700) await sleep(150);
+    return tailLines(id, 80);
+  },
+  async read(n, waitMs) { const id = ensureAgentTerm(); if (waitMs) await sleep(waitMs); return tailLines(id, n); }
+};
+
+// ---------- notes (markdown knowledge base) ----------
+const { createNotes } = require('./notes');
+const notesStore = createNotes({ getRoot: () => getSettings().notesFolder || (fs.existsSync(path.join(app.getPath('documents'), 'Ares Notes')) ? path.join(app.getPath('documents'), 'Ares Notes') : path.join(app.getPath('documents'), 'Artemis Notes')) });
+const notesSafe = (fn) => async (_e, ...a) => { try { return { ok: true, ...(await fn(...a)) }; } catch (e) { return { ok: false, error: e.message }; } };
+ipcMain.handle('notes:root', () => notesStore.root());
+ipcMain.handle('notes:pickRoot', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Choose the Notes folder', properties: ['openDirectory', 'createDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  writeJson('settings', { ...readJson('settings', {}), notesFolder: r.filePaths[0] });
+  return r.filePaths[0];
+});
+ipcMain.handle('notes:list', notesSafe(() => ({ items: notesStore.list() })));
+ipcMain.handle('notes:read', notesSafe((p) => notesStore.read(p, { max: 2e6 })));
+ipcMain.handle('notes:write', notesSafe((p, t) => notesStore.write(p, t)));
+ipcMain.handle('notes:create', notesSafe((n, f, t) => notesStore.create(n, f, t)));
+ipcMain.handle('notes:createFolder', notesSafe((n, f) => notesStore.createFolder(n, f)));
+ipcMain.handle('notes:rename', notesSafe((p, n) => notesStore.rename(p, n)));
+ipcMain.handle('notes:move', notesSafe((p, f) => notesStore.move(p, f)));
+ipcMain.handle('notes:delete', notesSafe((p) => { notesStore.remove(p); return {}; }));
+ipcMain.handle('notes:search', notesSafe((q) => ({ results: notesStore.search(q) })));
+ipcMain.handle('notes:reveal', () => { shell.openPath(notesStore.root()); return true; });
+function openTermWindow(id, float) {
+  const old = termWindows.get(id);
+  if (old && !old.isDestroyed()) { old.show(); old.focus(); return old; }
+  const tw = new BrowserWindow({
+    width: 860, height: 500, minWidth: 360, minHeight: 200, title: 'Artemis Terminal', backgroundColor: '#101010',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default', trafficLightPosition: { x: 12, y: 11 }, autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
+  });
+  if (float) { tw.setAlwaysOnTop(true, 'floating'); try { tw.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true }); } catch {} }
+  tw.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
+  if (IS_DEV) tw.loadURL('http://localhost:5173/#terminal=' + id);
+  else tw.loadFile(path.join(__dirname, '..', 'dist', 'renderer', 'index.html'), { hash: 'terminal=' + id });
+  termWindows.set(id, tw);
+  tw.on('closed', () => { if (termWindows.get(id) === tw) { termWindows.delete(id); if (!tw.__docked) terminals.close(id); } });
+  return tw;
+}
+ipcMain.handle('term:open', (_e, o = {}) => terminals.open({ cols: o.cols, rows: o.rows, cwd: o.cwd }));
+ipcMain.handle('term:input', (_e, id, data) => { terminals.input(String(id), data); return true; });
+ipcMain.handle('term:resize', (_e, id, cols, rows) => { terminals.resize(String(id), cols, rows); return true; });
+ipcMain.handle('term:snapshot', (_e, id) => terminals.snapshot(String(id)));
+ipcMain.handle('term:close', (_e, id) => { const w = termWindows.get(String(id)); if (w && !w.isDestroyed()) { w.__docked = false; w.close(); } else terminals.close(String(id)); return true; });
+ipcMain.handle('term:popout', (_e, id, float) => { openTermWindow(String(id), !!float); return true; });
+ipcMain.handle('term:dock', (_e, id) => {
+  const w = termWindows.get(String(id));
+  if (w && !w.isDestroyed()) { w.__docked = true; w.close(); }
+  if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.send('term:docked', { id: String(id) }); }
+  return true;
+});
+ipcMain.handle('term:float', (e, on) => { const w = BrowserWindow.fromWebContents(e.sender); if (!w) return false; w.setAlwaysOnTop(!!on, 'floating'); return w.isAlwaysOnTop(); });
+
+// ---------- macOS permissions ----------
+const permissions = createPermissions({ systemPreferences, desktopCapturer, Notification, shell });
+ipcMain.handle('perm:status', () => permissions.status());
+ipcMain.handle('perm:request', async (_e, kind) => { await permissions.request(kind); return permissions.status(); });
+
+// ---------- Artemis as an MCP server (other apps can control Artemis) ----------
+const { createMcpServer } = require('./mcp-server');
+const { buildArtemisTools } = require('./artemis-tools');
+let mcpServerError = '';
+const mcpToken = () => { let t = getSecret('mcpToken'); if (!t) { t = require('crypto').randomBytes(24).toString('hex'); setSecret('mcpToken', t); } return t; };
+// Settings changed from outside the window: save, apply the native theme and tell the window to reload them.
+function applyOutsideSettings(patch) {
+  saveSettings(patch);
+  if (patch.theme) { nativeThemeFor(); broadcastTheme(); }
+  toWinSafe('app:changed', {});
+}
+async function confirmOutside({ title, detail }) {
+  if (getSettings().mcpAlwaysAllow) return 'once'; // the user chose "Always allow" in an earlier prompt
+  // The question must be seen even when Artemis is in the background: bring it up and show a free-standing dialog.
+  try { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); } app.focus({ steal: true }); } catch {}
+  try { new Notification({ title: 'Artemis needs your answer', body: String(title || '').slice(0, 120) }).show(); } catch {}
+  const r = await dialog.showMessageBox({
+    type: 'question', buttons: ['Allow once', 'Allow for 10 minutes', 'Always allow', 'Deny'], defaultId: 3, cancelId: 3, noLink: true,
+    message: title, detail: String(detail || '').slice(0, 800) + '\n\nAn outside app is asking through the Artemis MCP server.\n"Always allow" stops these questions (you can turn them back on in Settings → Access).'
+  });
+  if (r.response === 2) { saveSettings({ mcpAlwaysAllow: true }); return 'once'; }
+  return r.response === 0 ? 'once' : r.response === 1 ? 'grant' : false;
+}
+const mcpServer = createMcpServer({
+  getToken: () => (getSettings().mcpServerEnabled ? getSecret('mcpToken') : ''),
+  log: (lvl, msg) => logger[lvl === 'warn' ? 'warn' : 'info']('mcp-server', msg),
+  tools: () => buildArtemisTools({
+    control: remote.control, getSettings, applySettings: applyOutsideSettings, notes: notesStore, term: termApi,
+    skills: () => skills.list(null).map((x) => ({ name: x.name, description: x.description, enabled: x.enabled })), confirm: confirmOutside,
+    imagesDir: IMAGES_DIR,
+    files: {
+      defs: () => tools.definitions({ hasFolder: true, shellEnabled: true }).filter((x) => ['list_dir', 'read_file', 'search_files', 'write_file', 'edit_file', 'create_folder', 'move_file', 'delete_file', 'run_command'].includes(x.function.name)),
+      projects: () => readJson('projects', []).filter((p) => p.folder).map((p) => ({ name: p.name, folder: p.folder, instructions: p.instructions || '' })),
+      rootOf: (ref) => {
+        const ps = readJson('projects', []).filter((p) => p.folder); const q = String(ref || '').trim().toLowerCase();
+        const p = q ? (ps.find((x) => x.id === ref || String(x.name).toLowerCase() === q) || ps.find((x) => String(x.name).toLowerCase().includes(q))) : (ps.length === 1 ? ps[0] : null);
+        if (!p) throw new Error(ps.length ? 'Pass "project": one of ' + ps.map((x) => `"${x.name}"`).join(', ') : 'No project with a folder yet. The user can create one in Artemis (Projects).');
+        return p.folder;
+      },
+      run: (name, args, o) => tools.run(name, args, { root: o.root, approve: o.approve, session: new Set(), autoApprove: false })
+    },
+    computer: { run: (a) => { if (!computer) throw new Error('Computer control is only available on macOS.'); return computer.run(a); } },
+    themes: () => listThemes().themes.map((t) => ({ id: t.id, name: t.name, group: t.group, dark: t.dark }))
+  })
+});
+async function syncMcpServer() {
+  const st = getSettings();
+  try {
+    if (mcpServer.running() && (!st.mcpServerEnabled || mcpServer.port() !== Number(st.mcpServerPort))) await mcpServer.stop();
+    if (st.mcpServerEnabled && !mcpServer.running()) { mcpToken(); await mcpServer.start(Math.min(65535, Math.max(1024, Number(st.mcpServerPort) || 8788))); logger.info('mcp-server', `Listening on 127.0.0.1:${mcpServer.port()}`); }
+    mcpServerError = '';
+  } catch (e) { mcpServerError = e && e.code === 'EADDRINUSE' ? `Port ${st.mcpServerPort} is already in use. Pick another one.` : String((e && e.message) || e); logger.error('mcp-server', mcpServerError); }
+}
+const mcpServerInfo = () => {
+  const st = getSettings();
+  return { enabled: !!st.mcpServerEnabled, running: mcpServer.running(), alwaysAllow: !!st.mcpAlwaysAllow, port: Number(st.mcpServerPort) || 8788, token: st.mcpServerEnabled ? getSecret('mcpToken') : '', error: mcpServerError };
+};
+ipcMain.handle('mcpserver:info', () => mcpServerInfo());
+ipcMain.handle('mcpserver:set', async (_e, o = {}) => {
+  const patch = {};
+  if (typeof o.enabled === 'boolean') patch.mcpServerEnabled = o.enabled;
+  if (typeof o.alwaysAllow === 'boolean') patch.mcpAlwaysAllow = o.alwaysAllow;
+  if (o.port !== undefined) patch.mcpServerPort = Math.min(65535, Math.max(1024, parseInt(o.port, 10) || 8788));
+  saveSettings(patch);
+  if (o.resetToken) setSecret('mcpToken', require('crypto').randomBytes(24).toString('hex'));
+  await syncMcpServer();
+  return mcpServerInfo();
+});
+
+// ---------- uygulama ----------
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) app.quit();
+app.on('second-instance', () => showMain());
+app.on('before-quit', () => { quitting = true; try { mcpServer.stop(); } catch {} try { sentinelWidget && sentinelWidget.destroy(); } catch {} });
+
+app.whenReady().then(() => {
+  if (!gotLock) return;
+  try {
+    const st = getSettings(); const provs = readProviders();
+    logger.info('app', 'Saved keys check', { userData: app.getPath('userData'), encryption: safeStorage.isEncryptionAvailable(), providers: provs.map((p) => ({ name: p.name, needsKey: p.needsKey, key: !!getProviderKey(p.id), models: (p.models || []).length })) });
+  } catch (e) { logger.error('app', 'Key check failed: ' + e.message); }
+  { const th = getSettings().theme; nativeTheme.themeSource = th === 'light' || th === 'notion' ? 'light' : th === 'system' ? 'system' : 'dark'; }
+  if (!IS_DEV) {
+    session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
+      cb({ responseHeaders: { ...details.responseHeaders,
+        'Content-Security-Policy': ["default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src artifact:; connect-src 'self' blob: data:"] } });
+    });
+  }
+  const template = [
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    { label: 'File', submenu: [
+      { label: 'New chat', accelerator: 'CmdOrCtrl+N', click: () => win?.webContents.send('menu', 'new-chat') },
+      { label: 'New tab', accelerator: 'CmdOrCtrl+T', click: () => win?.webContents.send('menu', 'new-tab') },
+      { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => win?.webContents.send('menu', 'close-tab') },
+      { label: 'Settings', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('menu', 'settings') },
+      { type: 'separator' },
+      { role: process.platform === 'darwin' ? 'close' : 'quit', accelerator: process.platform === 'darwin' ? 'CmdOrCtrl+Shift+W' : undefined }
+    ] },
+    { role: 'editMenu' }, { role: 'viewMenu' },
+    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, ...(process.platform === 'darwin' ? [{ type: 'separator' }, { role: 'front' }] : [])] }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  try {
+    protocol.handle('artifact', (req) => {
+      const html = staged.get(new URL(req.url).pathname.slice(1));
+      if (!html) return new Response('Not found', { status: 404 });
+      return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': ARTIFACT_CSP } });
+    });
+  } catch {}
+  if (process.platform === 'darwin' && app.dock) {
+    try {
+      const ico = nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'));
+      if (ico.isEmpty()) logger.warn('app', 'Dock icon file could not be read: build/icon.png');
+      else { app.dock.setIcon(ico); logger.info('app', 'Dock icon set from build/icon.png'); }
+      app.dock.show();
+    } catch (e) { logger.warn('app', 'Dock icon failed: ' + ((e && e.message) || e)); }
+  }
+  floater = createFloat({ BrowserWindow, screen });
+  remote = createRemote({
+    transcribe: transcribeAudio,
+    models: () => providersLib.modelEntries(readProviders()), readStore: (n) => readJson(n, []), mcpStatus: () => mcp.status(readMcpList()),
+    memory: memoryApi(() => { try { win?.webContents.send('chat:event', { type: 'memory:changed' }); } catch {} }),
+    skillsList: () => skills.list(null).map((x) => ({ name: x.name, description: x.description, enabled: x.enabled })),
+    chatsApi: {
+      recent: (n) => chatSearch.recentChats(readJson('chats', []), n, readJson('projects', [])),
+      search: (q, n) => chatSearch.searchChats(readJson('chats', []), q, { limit: n, projects: readJson('projects', []) }),
+      get: (id) => (readJson('chats', []) || []).find((c) => c.id === id && !c.incognito) || null,
+      turns: (c, n) => chatSearch.chatTurns(c, n)
+    },
+    appendToChat: (chatId, user, assistant) => {
+      // with a window open the turn was already streamed live into that chat (phone:start carries the chat id)
+      if (win && !win.isDestroyed()) return;
+      const list = readJson('chats', []); // no window: write straight into the saved chats
+      const c = list.find((x) => x.id === chatId);
+      if (c) { const id = () => Math.random().toString(36).slice(2, 10); c.messages.push({ id: id(), role: 'user', content: user, via: 'telegram' }, { id: id(), role: 'assistant', via: 'telegram', steps: [{ text: assistant, toolCalls: [] }] }); c.updatedAt = Date.now(); writeJson('chats', list); }
+    },
+    notes: notesStore,
+    providersApi: {
+      list: () => [...readProviders().map((p) => ({ key: p.id, name: p.name, on: p.enabled !== false }))],
+      set: (key, on) => {
+        { const l = readProviders(); const p = l.find((x) => x.id === key); if (p) { p.enabled = !!on; writeJson('providers', l); } }
+        toWinSafe('app:changed', {});
+      }
+    },
+    liveModel,
+    summarize: (messages) => compactSummary({ model: getSettings().remoteModel || getSettings().model, messages }),
+    desktopCompact: (chatId) => toWinSafe('remote:compact', { chatId }),
+    getSettings, getSecret, setSecret,
+    saveSettings: (patch) => { saveSettings(patch); if (patch && Object.keys(patch).some((k) => ['toolsEnabled', 'notesAi', 'webEnabled', 'shellEnabled', 'computerEnabled', 'memoryEnabled', 'connectorsEnabled', 'autoApproveEdits'].includes(k))) toWinSafe('app:changed', {}); },
+    decide: decideTool, abort: (rid) => runs.get(rid)?.abort(),
+    screenshot: async () => { if (!computer) throw new Error('Computer control is only available on macOS.'); const r = await computer.screenshot(); return r.image; },
+    parseFile: files.parseAttachment,
+    runChat: ({ requestId, messages, send: toPhone, session }) => {
+      const st = getSettings();
+      const toWin = (ch, p) => { try { if (win && !win.isDestroyed()) win.webContents.send(ch, p); } catch {} };
+      const last = messages[messages.length - 1];
+      const c = last && last.content;
+      const text = typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join(' ');
+      const images = Array.isArray(c) ? c.filter((p) => p.type === 'image_url').map((p) => p.image_url.url) : [];
+      const model = liveModel(remote.control.currentModel());
+      const linkedChat = remote.linked && remote.linked();
+      toWin('phone:start', { requestId, session, text, images, model, projectId: st.remoteProjectId || null, chatId: linkedChat ? linkedChat.id : null });
+      const send = (ev) => { toPhone(ev); toWin('chat:event', { ...ev, requestId }); };
+      return executeRun({
+        requestId, messages, send, restrict: !st.remoteAllowDangerous, source: 'phone',
+        model, system: st.systemPrompt, maxTokens: st.maxTokens,
+        project: (() => { const p = remote.control.resolveProject(); return p && p.folder && fs.existsSync(p.folder) ? { name: p.name, instructions: p.instructions, folder: p.folder } : p && !p.folder ? { name: p.name, instructions: p.instructions } : null; })()
+      });
+    }
+  });
+  remote.reconfigure().catch(() => {});
+  syncMcpServer().catch(() => {});
+  // one-time: file edits are auto-approved by default now (deleting still asks)
+  if (!getSettings().migAutoApprove2) saveSettings({ migAutoApprove2: true });
+  if (!getSettings().migAskDefault) saveSettings({ autoApproveEdits: false, migAskDefault: true }); // everything asks by default
+  scheduler.start();
+  mcp.configure(readMcpList()).catch(() => {});
+  computer = createComputer({ screenSize: () => screen.getPrimaryDisplay().size, avoid: () => floater.rect() });
+  quick = createQuick({ BrowserWindow, screen, isDev: IS_DEV, nativeTheme });
+  palette = createPalette({ BrowserWindow, screen, isDev: IS_DEV });
+  createWindow();
+  try { createTray(); } catch (e) { tray = null; }
+  applyShortcut();
+  applyLoginItem();
+  app.on('activate', () => showMain());
+});
+app.on('will-quit', () => { try { terminals.closeAll(); } catch {} scheduler.stop(); globalShortcut.unregisterAll(); remote?.stop(); mcp.close(); });
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

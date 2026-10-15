@@ -1,0 +1,75 @@
+import React from 'react';
+import { Icon } from './Icons.jsx';
+import ProjectLogo from './ProjectLogo.jsx';
+import Composer from './Composer.jsx';
+import { dayGroup } from '../lib/history.js';
+
+const base = (p) => (p ? String(p).split(/[\\/]/).filter(Boolean).pop() : '');
+
+export function ProjectsList({ projects, chats, onOpen, onNew, onPin }) {
+  return (
+    <div className="page">
+      <div className="page-head">
+        <h1>Projects</h1>
+        <button className="primary-btn" onClick={onNew}><Icon name="plus" size={15} /> New project</button>
+      </div>
+      {projects.length === 0 ? (
+        <div className="empty-card">
+          <Icon name="folderPlus" size={28} />
+          <p>Projects keep chats, instructions and a working folder together.</p>
+          <button className="primary-btn" onClick={onNew}>Create your first project</button>
+        </div>
+      ) : (
+        <div className="cards">
+          {[...projects].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)).map((p) => {
+            const n = chats.filter((c) => c.projectId === p.id).length;
+            return (
+              <button key={p.id} className="card" onClick={() => onOpen(p.id)}>
+                <div className="card-title"><ProjectLogo logo={p.logo} size={16} /> {p.name}<span role="button" className={`card-pin ${p.pinned ? 'on' : ''}`} title={p.pinned ? 'Unpin' : 'Pin'} onClick={(e) => { e.stopPropagation(); onPin(p.id); }}><Icon name="pin" size={14} /></span></div>
+                <div className="card-text">{p.instructions ? p.instructions.slice(0, 110) : 'No instructions yet'}</div>
+                <div className="card-meta">
+                  {p.folder && <span><Icon name="folderOpen" size={13} /> {base(p.folder)}</span>}
+                  <span><Icon name="chat" size={13} /> {n} chat{n === 1 ? '' : 's'}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ProjectPage({ project, chats, statusOf, onBack, onEdit, onSelect, onStartChat }) {
+  const list = chats.filter((c) => c.projectId === project.id && c.messages.length).sort((a, b) => b.updatedAt - a.updatedAt);
+  return (
+    <div className="page">
+      <button className="link-btn" onClick={onBack}><Icon name="chevronRight" size={14} className="flip" /> All projects</button>
+      <div className="page-head">
+        <h1><ProjectLogo logo={project.logo} size={22} /> {project.name}</h1>
+        <div className="head-actions">
+          {project.folder && <button onClick={() => window.api.openPath(project.folder)}><Icon name="external" size={14} /> Open folder</button>}
+          <button onClick={onEdit}><Icon name="sliders" size={14} /> Settings</button>
+        </div>
+      </div>
+      {project.folder && <div className="muted small proj-path"><Icon name="folderOpen" size={14} /> {project.folder}</div>}
+      {project.instructions && <div className="instr"><div className="instr-label">Instructions</div>{project.instructions}</div>}
+      <Composer key={project.id} streaming={false} onSend={onStartChat} onStop={() => {}} placeholder={`Start a chat in ${project.name}…`} />
+      <div className="section-title">Chats</div>
+      {list.length === 0 ? <div className="muted small">No chats in this project yet.</div> : (
+        <div className="proj-chats">
+          {list.map((c) => {
+            const st = statusOf(c);
+            return (
+              <button key={c.id} className="proj-chat" onClick={() => onSelect(c.id)}>
+                <Icon name={st === 'running' ? 'spinner' : st === 'awaiting' ? 'warning' : 'chat'} size={15} />
+                <span className="t">{c.title}</span>
+                <span className="muted small">{dayGroup(c.updatedAt)}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

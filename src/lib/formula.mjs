@@ -1,0 +1,215 @@
+// A small spreadsheet formula engine: arithmetic, comparisons, cell refs, ranges, cross-sheet refs and common functions.
+export const colName = (j) => { let n = j, s = ''; do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0); return s; };
+export const colIndex = (s) => { let n = 0; for (const ch of s.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; };
+export const cellName = (r, c) => colName(c) + (r + 1);
+
+class Err { constructor(code) { this.code = code; } toString() { return this.code; } }
+export const isErr = (v) => v instanceof Err;
+const E = (c) => new Err(c);
+
+function tokenize(src) {
+  const t = []; let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '"') { let j = i + 1, s = ''; while (j < src.length && !(src[j] === '"' && src[j + 1] !== '"')) { if (src[j] === '"') { s += '"'; j += 2; } else s += src[j++]; } t.push({ k: 'str', v: s }); i = j + 1; continue; }
+    if (/[0-9.]/.test(ch)) { const m = /^(\d+\.?\d*|\.\d+)(e[+-]?\d+)?/i.exec(src.slice(i)); if (!m) throw E('#VALUE!'); t.push({ k: 'num', v: parseFloat(m[0]) }); i += m[0].length; continue; }
+    if (ch === "'") { const j = src.indexOf("'", i + 1); if (j < 0) throw E('#REF!'); const name = src.slice(i + 1, j); i = j + 1; if (src[i] === '!') { i++; const m = /^\$?([A-Za-z]{1,3})\$?(\d+)/.exec(src.slice(i)); if (!m) throw E('#REF!'); t.push({ k: 'ref', sheet: name, c: colIndex(m[1]), r: +m[2] - 1 }); i += m[0].length; continue; } throw E('#NAME?'); }
+    if (/[A-Za-z_$]/.test(ch)) {
+      const m = /^(\$?[A-Za-z]{1,3}\$?\d+)(?![A-Za-z0-9_(])/.exec(src.slice(i));
+      if (m) { const mm = /^\$?([A-Za-z]{1,3})\$?(\d+)$/.exec(m[1]); t.push({ k: 'ref', c: colIndex(mm[1]), r: +mm[2] - 1 }); i += m[0].length; continue; }
+      const w = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(src.slice(i));
+      if (!w) throw E('#NAME?');
+      i += w[0].length;
+      if (src[i] === '!') { i++; const m2 = /^\$?([A-Za-z]{1,3})\$?(\d+)/.exec(src.slice(i)); if (!m2) throw E('#REF!'); t.push({ k: 'ref', sheet: w[0], c: colIndex(m2[1]), r: +m2[2] - 1 }); i += m2[0].length; continue; }
+      t.push({ k: src[i] === '(' ? 'fn' : 'name', v: w[0].toUpperCase() }); continue;
+    }
+    const two = src.slice(i, i + 2);
+    if (['<=', '>=', '<>'].includes(two)) { t.push({ k: 'op', v: two }); i += 2; continue; }
+    if ('+-*/^&=<>(),:%'.includes(ch)) { t.push({ k: 'op', v: ch }); i++; continue; }
+    throw E('#VALUE!');
+  }
+  return t;
+}
+
+function parse(tokens) {
+  let p = 0;
+  const peek = () => tokens[p], next = () => tokens[p++];
+  const isOp = (v) => peek() && peek().k === 'op' && peek().v === v;
+  function expr() { return cmp(); }
+  function cmp() { let l = concat(); while (peek() && peek().k === 'op' && ['=', '<>', '<', '>', '<=', '>='].includes(peek().v)) { const op = next().v; l = { t: 'bin', op, l, r: concat() }; } return l; }
+  function concat() { let l = add(); while (isOp('&')) { next(); l = { t: 'bin', op: '&', l, r: add() }; } return l; }
+  function add() { let l = mul(); while (isOp('+') || isOp('-')) { const op = next().v; l = { t: 'bin', op, l, r: mul() }; } return l; }
+  function mul() { let l = pow(); while (isOp('*') || isOp('/')) { const op = next().v; l = { t: 'bin', op, l, r: pow() }; } return l; }
+  function pow() { let l = unary(); while (isOp('^')) { next(); l = { t: 'bin', op: '^', l, r: unary() }; } return l; }
+  function unary() { if (isOp('-')) { next(); return { t: 'neg', e: unary() }; } if (isOp('+')) { next(); return unary(); } return pct(); }
+  function pct() { let e = primary(); while (isOp('%')) { next(); e = { t: 'bin', op: '/', l: e, r: { t: 'num', v: 100 } }; } return e; }
+  function primary() {
+    const tk = next();
+    if (!tk) throw E('#VALUE!');
+    if (tk.k === 'num') return { t: 'num', v: tk.v };
+    if (tk.k === 'str') return { t: 'str', v: tk.v };
+    if (tk.k === 'ref') {
+      if (isOp(':')) { next(); const b = next(); if (!b || b.k !== 'ref') throw E('#REF!'); return { t: 'range', sheet: tk.sheet, r1: Math.min(tk.r, b.r), c1: Math.min(tk.c, b.c), r2: Math.max(tk.r, b.r), c2: Math.max(tk.c, b.c) }; }
+      return { t: 'ref', sheet: tk.sheet, r: tk.r, c: tk.c };
+    }
+    if (tk.k === 'name') { if (tk.v === 'TRUE') return { t: 'num', v: true }; if (tk.v === 'FALSE') return { t: 'num', v: false }; throw E('#NAME?'); }
+    if (tk.k === 'fn') {
+      next(); // (
+      const args = [];
+      if (!isOp(')')) { for (;;) { args.push(expr()); if (isOp(',')) { next(); continue; } break; } }
+      if (!isOp(')')) throw E('#VALUE!');
+      next();
+      return { t: 'fn', name: tk.v, args };
+    }
+    if (tk.k === 'op' && tk.v === '(') { const e = expr(); if (!isOp(')')) throw E('#VALUE!'); next(); return e; }
+    throw E('#VALUE!');
+  }
+  const ast = expr();
+  if (p < tokens.length) throw E('#VALUE!');
+  return ast;
+}
+
+const num = (v) => {
+  if (isErr(v)) throw v;
+  if (v === '' || v == null) return 0;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'number') return v;
+  const n = Number(String(v).trim());
+  if (Number.isNaN(n)) throw E('#VALUE!');
+  return n;
+};
+const str = (v) => { if (isErr(v)) throw v; return v == null ? '' : typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : String(v); };
+const bool = (v) => { if (isErr(v)) throw v; if (typeof v === 'string') return v.toUpperCase() === 'TRUE' || (v !== '' && Number(v) !== 0 && !Number.isNaN(Number(v))); return !!v; };
+
+function criteriaFn(c) {
+  if (typeof c === 'number') return (v) => typeof v === 'number' && v === c;
+  const m = /^(<=|>=|<>|<|>|=)?(.*)$/.exec(String(c));
+  const op = m[1] || '=', rhsRaw = m[2], rhs = Number(rhsRaw);
+  const isNum = rhsRaw !== '' && !Number.isNaN(rhs);
+  return (v) => {
+    const a = isNum && (typeof v === 'number' || (v !== '' && !Number.isNaN(Number(v)))) ? Number(v) : String(v ?? '').toLowerCase();
+    const b = isNum ? rhs : rhsRaw.toLowerCase();
+    if (typeof a !== typeof b) return op === '<>';
+    return { '=': a === b, '<>': a !== b, '<': a < b, '>': a > b, '<=': a <= b, '>=': a >= b }[op];
+  };
+}
+
+/**
+ * book: { sheets: [{ name, rows: [[raw...]] }], cache?: {} }  raw values are numbers/strings; strings starting with "=" are formulas.
+ * Returns an evaluator: evalCell(sheetIndex, r, c) -> number | string | boolean | Err
+ */
+export function createEvaluator(sheets) {
+  const memo = new Map(); const stack = new Set(); const asts = new Map();
+  const byName = (n) => { const i = sheets.findIndex((s) => s.name.toLowerCase() === String(n).toLowerCase()); if (i < 0) throw E('#REF!'); return i; };
+  const raw = (si, r, c) => { const row = sheets[si].rows[r]; return row ? row[c] : undefined; };
+
+  function cellValue(si, r, c) {
+    const key = si + ':' + r + ':' + c;
+    if (memo.has(key)) return memo.get(key);
+    const v = raw(si, r, c);
+    let out;
+    if (typeof v === 'string' && v.length > 1 && v[0] === '=') {
+      if (stack.has(key)) return E('#CYCLE!');
+      stack.add(key);
+      try {
+        let ast = asts.get(v);
+        if (!ast) { ast = parse(tokenize(v.slice(1))); asts.set(v, ast); }
+        out = evalAst(ast, si);
+        if (out && out.__range) out = out.values[0] ?? 0;
+      } catch (e) { out = isErr(e) ? e : E('#VALUE!'); }
+      stack.delete(key);
+    } else if (v === undefined || v === null || v === '') out = '';
+    else if (typeof v === 'number' || typeof v === 'boolean') out = v;
+    else { const s = String(v); out = s.trim() !== '' && !Number.isNaN(Number(s)) && /^\s*-?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?\s*$/i.test(s) ? Number(s) : s; }
+    memo.set(key, out);
+    return out;
+  }
+
+  function flat(args, si, numericOnly) {
+    const out = [];
+    for (const a of args) {
+      const v = evalAst(a, si);
+      if (v && v.__range) for (const x of v.values) { if (isErr(x)) throw x; if (numericOnly ? typeof x === 'number' : x !== '') out.push(x); }
+      else { if (isErr(v)) throw v; out.push(numericOnly ? num(v) : v); }
+    }
+    return out;
+  }
+
+  const FN = {
+    SUM: (a, si) => flat(a, si, true).reduce((x, y) => x + y, 0),
+    AVERAGE: (a, si) => { const v = flat(a, si, true); if (!v.length) throw E('#DIV/0!'); return v.reduce((x, y) => x + y, 0) / v.length; },
+    MIN: (a, si) => { const v = flat(a, si, true); return v.length ? Math.min(...v) : 0; },
+    MAX: (a, si) => { const v = flat(a, si, true); return v.length ? Math.max(...v) : 0; },
+    COUNT: (a, si) => flat(a, si, true).length,
+    COUNTA: (a, si) => flat(a, si, false).length,
+    PRODUCT: (a, si) => flat(a, si, true).reduce((x, y) => x * y, 1),
+    MEDIAN: (a, si) => { const v = flat(a, si, true).sort((x, y) => x - y); if (!v.length) throw E('#NUM!'); const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; },
+    ABS: (a, si) => Math.abs(num(evalAst(a[0], si))),
+    SQRT: (a, si) => { const n = num(evalAst(a[0], si)); if (n < 0) throw E('#NUM!'); return Math.sqrt(n); },
+    INT: (a, si) => Math.floor(num(evalAst(a[0], si))),
+    ROUND: (a, si) => { const n = num(evalAst(a[0], si)), d = a[1] ? num(evalAst(a[1], si)) : 0; const f = 10 ** d; return Math.round((n + Number.EPSILON) * f) / f; },
+    POWER: (a, si) => num(evalAst(a[0], si)) ** num(evalAst(a[1], si)),
+    MOD: (a, si) => { const d = num(evalAst(a[1], si)); if (d === 0) throw E('#DIV/0!'); const n = num(evalAst(a[0], si)); return n - d * Math.floor(n / d); },
+    LEN: (a, si) => str(evalAst(a[0], si)).length,
+    UPPER: (a, si) => str(evalAst(a[0], si)).toUpperCase(),
+    LOWER: (a, si) => str(evalAst(a[0], si)).toLowerCase(),
+    TRIM: (a, si) => str(evalAst(a[0], si)).trim().replace(/\s+/g, ' '),
+    CONCAT: (a, si) => flat(a, si, false).map(str).join(''),
+    CONCATENATE: (a, si) => flat(a, si, false).map(str).join(''),
+    IF: (a, si) => (bool(evalAst(a[0], si)) ? evalAst(a[1] || { t: 'num', v: true }, si) : a[2] ? evalAst(a[2], si) : false),
+    IFERROR: (a, si) => { try { const v = evalAst(a[0], si); if (isErr(v)) throw v; return v; } catch (e) { if (isErr(e)) return evalAst(a[1], si); throw e; } },
+    AND: (a, si) => flat(a, si, false).every(bool),
+    OR: (a, si) => flat(a, si, false).some(bool),
+    NOT: (a, si) => !bool(evalAst(a[0], si)),
+    TODAY: () => new Date().toISOString().slice(0, 10),
+    SUMIF: (a, si) => {
+      const rng = evalAst(a[0], si); const test = criteriaFn(evalAst(a[1], si)); const sumR = a[2] ? evalAst(a[2], si) : rng;
+      if (!rng.__range) throw E('#VALUE!');
+      return rng.values.reduce((t, v, i) => (test(v) && typeof sumR.values[i] === 'number' ? t + sumR.values[i] : t), 0);
+    },
+    COUNTIF: (a, si) => { const rng = evalAst(a[0], si); const test = criteriaFn(evalAst(a[1], si)); if (!rng.__range) throw E('#VALUE!'); return rng.values.filter(test).length; }
+  };
+
+  function evalAst(n, si) {
+    switch (n.t) {
+      case 'num': case 'str': return n.v;
+      case 'ref': { const s = n.sheet ? byName(n.sheet) : si; return cellValue(s, n.r, n.c); }
+      case 'range': {
+        const s = n.sheet ? byName(n.sheet) : si; const values = [];
+        for (let r = n.r1; r <= n.r2; r++) for (let c = n.c1; c <= n.c2; c++) values.push(cellValue(s, r, c));
+        return { __range: true, values };
+      }
+      case 'neg': return -num(evalAst(n.e, si));
+      case 'bin': {
+        const l = evalAst(n.l, si), r = evalAst(n.r, si);
+        if (isErr(l)) throw l; if (isErr(r)) throw r;
+        const lv = l && l.__range ? l.values[0] : l, rv = r && r.__range ? r.values[0] : r;
+        switch (n.op) {
+          case '+': return num(lv) + num(rv);
+          case '-': return num(lv) - num(rv);
+          case '*': return num(lv) * num(rv);
+          case '/': { const d = num(rv); if (d === 0) throw E('#DIV/0!'); return num(lv) / d; }
+          case '^': return num(lv) ** num(rv);
+          case '&': return str(lv) + str(rv);
+          default: {
+            const both = typeof lv === 'number' && typeof rv === 'number';
+            const a = both ? lv : str(lv).toLowerCase(), b = both ? rv : str(rv).toLowerCase();
+            return { '=': a === b, '<>': a !== b, '<': a < b, '>': a > b, '<=': a <= b, '>=': a >= b }[n.op];
+          }
+        }
+      }
+      case 'fn': { const f = FN[n.name]; if (!f) throw E('#NAME?'); return f(n.args, si); }
+      default: throw E('#VALUE!');
+    }
+  }
+
+  return (si, r, c) => cellValue(si, r, c);
+}
+
+export function formatValue(v) {
+  if (isErr(v)) return v.code;
+  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  if (typeof v === 'number') { if (Number.isInteger(v)) return String(v); const s = String(Number(v.toPrecision(12))); return s; }
+  return v == null ? '' : String(v);
+}

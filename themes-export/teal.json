@@ -1,0 +1,27 @@
+{
+  "id": "teal",
+  "name": "Teal",
+  "group": "My themes",
+  "dark": true,
+  "preview": [
+    "rgb(2, 9, 9)",
+    "rgb(0, 142, 122)",
+    "rgb(4, 16, 16)"
+  ],
+  "vars": {
+    "--theme-bg": "rgb(2, 9, 9)",
+    "--theme-side": "rgb(1, 4, 4)",
+    "--theme-panel": "rgb(4, 16, 16)",
+    "--theme-user": "rgb(6, 20, 21)",
+    "--theme-code": "rgb(1, 4, 4)",
+    "--theme-border": "rgb(32, 56, 57)",
+    "--theme-text": "rgb(241, 246, 246)",
+    "--theme-muted": "rgb(157, 175, 176)",
+    "--theme-accent": "rgb(0, 142, 122)",
+    "--theme-accent-text": "#fff",
+    "--theme-hover": "rgba(255,255,255,.06)",
+    "--theme-active": "rgba(255,255,255,.1)",
+    "--theme-add": "rgba(80,200,120,.16)",
+    "--theme-del": "rgba(240,90,80,.16)"
+  }
+}

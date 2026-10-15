@@ -1,0 +1,59 @@
+// Turns chat messages (app format) into the OpenAI message format.
+import { stripThink } from './think.mjs';
+export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
+export function assistantText(m) {
+  return (m.steps || []).map((s) => stripThink(s.text)).filter(Boolean).join('\n\n');
+}
+
+export function toApiMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === 'user') {
+      let text = '';
+      const images = [];
+      for (const a of m.attachments || []) {
+        if (a.kind === 'image' && a.dataUrl) images.push(a);
+        else if (a.text != null) {
+          text += `<attachment name="${a.name}">\n${a.text}${a.truncated ? '\n…[truncated]' : ''}\n</attachment>\n\n`;
+        }
+      }
+      text += m.content || '';
+      if (images.length) {
+        out.push({
+          role: 'user',
+          content: [{ type: 'text', text: text || '(image)' }, ...images.map((i) => ({ type: 'image_url', image_url: { url: i.dataUrl } }))]
+        });
+      } else out.push({ role: 'user', content: text });
+    } else {
+      for (const step of m.steps || []) {
+        const calls = (step.toolCalls || []);
+        if (calls.length) {
+          out.push({
+            role: 'assistant', content: stripThink(step.text) || null,
+            tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args || {}) } }))
+          });
+          for (const c of calls) out.push({ role: 'tool', tool_call_id: c.id, content: c.result ?? '(cancelled)' });
+        } else if (stripThink(step.text)) {
+          out.push({ role: 'assistant', content: stripThink(step.text) });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export function dayGroup(ts) {
+  const d = new Date(ts), now = new Date();
+  const days = Math.floor((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return 'Last 7 days';
+  if (days < 30) return 'Last 30 days';
+  return 'Older';
+}
+
+export function greeting() {
+  const h = new Date().getHours();
+  return h < 6 ? 'Hello' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}

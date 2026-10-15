@@ -1,0 +1,27 @@
+{
+  "id": "ares",
+  "name": "Ares",
+  "group": "Gods",
+  "dark": true,
+  "preview": [
+    "#130808",
+    "#c9923a",
+    "#1d0e0d"
+  ],
+  "vars": {
+    "--theme-bg": "#130808",
+    "--theme-side": "#0a0404",
+    "--theme-panel": "#1d0e0d",
+    "--theme-user": "#271211",
+    "--theme-code": "#0a0404",
+    "--theme-border": "#4d2623",
+    "--theme-text": "#f5e9e2",
+    "--theme-muted": "#b99b90",
+    "--theme-accent": "#c9923a",
+    "--theme-accent-text": "#1a0b05",
+    "--theme-hover": "rgba(255,255,255,.06)",
+    "--theme-active": "rgba(255,255,255,.1)",
+    "--theme-add": "rgba(80,200,120,.16)",
+    "--theme-del": "rgba(240,90,80,.16)"
+  }
+}

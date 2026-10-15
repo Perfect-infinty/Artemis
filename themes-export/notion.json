@@ -1,0 +1,30 @@
+{
+  "id": "notion",
+  "name": "Notion",
+  "group": "Basic",
+  "dark": false,
+  "preview": [
+    "#ffffff",
+    "#2383e2",
+    "#ffffff"
+  ],
+  "vars": {
+    "--theme-bg": "#ffffff",
+    "--theme-side": "#f7f7f5",
+    "--theme-panel": "#ffffff",
+    "--theme-user": "#f7f6f3",
+    "--theme-code": "#f7f6f3",
+    "--theme-border": "#e9e9e7",
+    "--theme-text": "#37352f",
+    "--theme-muted": "#787774",
+    "--theme-accent": "#2383e2",
+    "--theme-accent-text": "#ffffff",
+    "--theme-hover": "rgba(55,53,47,.06)",
+    "--theme-active": "rgba(55,53,47,.1)",
+    "--theme-danger": "#eb5757",
+    "--theme-ok": "#448361",
+    "--theme-warn": "#cb912f",
+    "--theme-add": "rgba(68,131,97,.14)",
+    "--theme-del": "rgba(235,87,87,.14)"
+  }
+}

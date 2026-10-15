@@ -1,0 +1,17 @@
+const fs = require('fs'), os = require('os'), path = require('path'), assert = require('assert');
+const { createNotes } = require('../electron/notes');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-'));
+const n = createNotes({ getRoot: () => dir });
+const a = n.create('Ideas'); assert.strictEqual(a.path, 'Ideas.md');
+assert.strictEqual(n.create('Ideas').path, 'Ideas 2.md');
+n.createFolder('Work'); n.write('Work/Plan', 'Launch the rocket on Friday');
+n.write('Work/Plan', 'second line', { append: true });
+assert(n.read('Work/Plan.md').text.includes('second line'));
+assert.strictEqual(n.search('rocket')[0].path, 'Work/Plan.md');
+assert.throws(() => n.read('../etc/passwd'));
+assert.throws(() => n.write('../../evil', 'x'));
+assert.strictEqual(n.rename('Ideas.md', 'Thoughts').path, 'Thoughts.md');
+assert.strictEqual(n.move('Thoughts.md', 'Work').path, 'Work/Thoughts.md');
+assert(n.list().some((f) => f.path === 'Work' && f.dir));
+n.remove('Work'); assert.strictEqual(n.list().filter((f) => !f.dir).length, 1);
+console.log('notes: all tests passed');

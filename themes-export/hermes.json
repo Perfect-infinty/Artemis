@@ -1,0 +1,27 @@
+{
+  "id": "hermes",
+  "name": "Hermes",
+  "group": "Gods",
+  "dark": true,
+  "preview": [
+    "#0a0a6e",
+    "#e8e27a",
+    "#101088"
+  ],
+  "vars": {
+    "--theme-bg": "#0a0a6e",
+    "--theme-side": "#060650",
+    "--theme-panel": "#101088",
+    "--theme-user": "#171799",
+    "--theme-code": "#060650",
+    "--theme-border": "rgba(230,230,255,.16)",
+    "--theme-text": "#e6e6f5",
+    "--theme-muted": "#9d9dd6",
+    "--theme-accent": "#e8e27a",
+    "--theme-accent-text": "#0a0a50",
+    "--theme-hover": "rgba(230,230,255,.07)",
+    "--theme-active": "rgba(230,230,255,.13)",
+    "--theme-add": "rgba(140,196,167,.22)",
+    "--theme-del": "rgba(240,148,158,.22)"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "amber",
+  "name": "Amber",
+  "group": "My themes",
+  "dark": true,
+  "preview": [
+    "rgb(12, 6, 3)",
+    "rgb(185, 88, 0)",
+    "rgb(20, 11, 6)"
+  ],
+  "vars": {
+    "--theme-bg": "rgb(12, 6, 3)",
+    "--theme-side": "rgb(6, 3, 1)",
+    "--theme-panel": "rgb(20, 11, 6)",
+    "--theme-user": "rgb(25, 15, 8)",
+    "--theme-code": "rgb(6, 3, 1)",
+    "--theme-border": "rgb(64, 46, 35)",
+    "--theme-text": "rgb(248, 244, 242)",
+    "--theme-muted": "rgb(182, 168, 158)",
+    "--theme-accent": "rgb(185, 88, 0)",
+    "--theme-accent-text": "#fff",
+    "--theme-hover": "rgba(255,255,255,.06)",
+    "--theme-active": "rgba(255,255,255,.1)",
+    "--theme-add": "rgba(80,200,120,.16)",
+    "--theme-del": "rgba(240,90,80,.16)"
+  }
+}
