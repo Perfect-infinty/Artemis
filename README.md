@@ -30,7 +30,7 @@ Settings (Cmd/Ctrl+,) → Providers → Add provider (OpenRouter, Cloudflare, Op
 
 ## Layout
 ```
-electron/  main.js (window, IPC) · agent.js (tool loop) · tools.js · files.js · preload.js
+electron/  main.js (window, wiring) · ipc/ (IPC handlers) · agent.js (tool loop) · tools.js · files.js · preload.js
 src/       React UI (App.jsx, components/, lib/)
 scripts/   tests
 ```

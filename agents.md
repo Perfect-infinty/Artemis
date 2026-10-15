@@ -24,7 +24,7 @@ API keys: Settings → Providers (stored encrypted per provider).
 
 ## Architecture
 
-**Process split.** `electron/main.js` (~100 KB, the hub) owns windows, tray, IPC handlers, persistence and wires every module together. The renderer (`src/`) only talks to it through the `window.api` bridge defined in `electron/preload.js`. Adding a feature that crosses the boundary means touching three places: an `ipcMain.handle` in `main.js`, a method in `preload.js`, and the caller in `src/`. Streaming chat results come back as `chat:event` messages, not as return values.
+**Process split.** `electron/main.js` (the hub) owns windows, tray, persistence and the IPC handlers that need its mutable state (the rest are in `electron/ipc/`), and wires every module together. The renderer (`src/`) only talks to it through the `window.api` bridge defined in `electron/preload.js`. Adding a feature that crosses the boundary means touching three places: an `ipcMain.handle` in `main.js`, a method in `preload.js`, and the caller in `src/`. Streaming chat results come back as `chat:event` messages, not as return values.
 
 **Chat/tool loop (`electron/agent.js`).** `runAgent` is the core: build the system prompt (`buildSystem`, which switches sections on feature flags), stream one completion (`streamOnce`), execute any tool calls via `electron/tools.js`, append results, repeat (max 40 iterations, plus a token budget). It also handles:
 - context compaction (`summarizeHistory` / `compactHistory`) and screenshot pruning;
