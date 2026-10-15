@@ -74,8 +74,6 @@ function recordUsage(entry) {
     writeJson('usage', list.length > USAGE_MAX ? list.slice(-USAGE_MAX) : list);
   } catch {}
 }
-ipcMain.handle('usage:get', () => readJson('usage', []));
-ipcMain.handle('usage:clear', () => { writeJson('usage', []); return []; });
 const { checkLimits } = require('./limits');
 const providersLib = require('./providers');
 const { createSkills } = require('./skills');
@@ -263,21 +261,6 @@ function showBrowser(url) {
   return true;
 }
 function hideBrowser() { if (browserView) browserView.setVisible(false); browserRect = null; }
-ipcMain.handle('browser:bounds', (_e, r) => {
-  if (!r || ![r.x, r.y, r.width, r.height].every(Number.isFinite)) return false;
-  browserRect = { x: Math.max(0, Math.round(r.x)), y: Math.max(0, Math.round(r.y)), width: Math.max(50, Math.round(r.width)), height: Math.max(50, Math.round(r.height)) };
-  if (browserView) browserView.setBounds(browserRect);
-  return true;
-});
-ipcMain.handle('browser:visible', (_e, v) => { if (browserView) browserView.setVisible(!!v); return true; });
-ipcMain.handle('browser:nav', (_e, a) => {
-  const wc = browserView && browserView.webContents; if (!wc) return false;
-  if (a === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
-  else if (a === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
-  else if (a === 'reload') wc.reload();
-  return true;
-});
-ipcMain.handle('browser:external', (_e, u) => { if (/^https?:\/\//i.test(String(u || ''))) { shell.openExternal(String(u)); return true; } return false; });
 function createWindow() {
   const isMac = process.platform === 'darwin';
   win = new BrowserWindow({
@@ -342,37 +325,10 @@ ipcMain.handle('settings:set', async (_e, patch) => {
 const publicProviders = () => readProviders().map((p) => ({ ...p, hasKey: !!getProviderKey(p.id) }));
 const claudeUsage = require('./claude-usage').createClaudeUsage();
 ipcMain.handle('claude:usage', (_e, o) => claudeUsage({ force: !!(o && o.force) }));
-ipcMain.handle('providers:presets', () => providersLib.PRESETS);
-ipcMain.handle('providers:list', () => ({ providers: publicProviders(), prices: providersLib.priceMap(readProviders()) }));
-ipcMain.handle('providers:save', (_e, p, apiKey) => {
-  const list = readProviders();
-  const clean = providersLib.normalize(p || {}, p && p.id);
-  const i = list.findIndex((x) => x.id === clean.id);
-  if (i >= 0) list[i] = clean; else list.push(clean);
-  writeJson('providers', list);
-  if (typeof apiKey === 'string') {
-    const keys = readProviderKeys();
-    if (apiKey.trim()) keys[clean.id] = encStr(apiKey.trim());
-    else if (p && p.clearKey) delete keys[clean.id];
-    writeJson('providerkeys', keys);
-  }
-  return { providers: publicProviders(), prices: providersLib.priceMap(list), saved: clean.id };
-});
-ipcMain.handle('providers:delete', (_e, id) => {
-  writeJson('providers', readProviders().filter((p) => p.id !== id));
-  const keys = readProviderKeys(); delete keys[id]; writeJson('providerkeys', keys);
-  return { providers: publicProviders(), prices: providersLib.priceMap(readProviders()) };
-});
-ipcMain.handle('providers:test', (_e, p, apiKey) => {
-  const key = (typeof apiKey === 'string' && apiKey.trim()) || (p && p.id ? getProviderKey(p.id) : '') || '';
-  return providersLib.probe({ baseUrl: p && p.baseUrl, key, models: p && p.models, headers: p && p.headers });
-});
 
 // ---------- IPC: skills ----------
 const skillRoot = (rootArg) => (rootArg && fs.existsSync(rootArg) ? rootArg : null);
-require('./ipc/skills')({ ipcMain, app, dialog, shell, fs, path, skills, createSkillHub, skillRoot, getWin: () => win });
 // ---------- IPC: themes ----------
-require('./ipc/themes')({ ipcMain, dialog, shell, fs, path, themes, themeDirs, listThemes, nativeThemeFor, broadcastTheme, getSettings, saveSettings, getWin: () => win });
 
 // ---------- IPC: profile (about you + avatar in ~/.ares/user/images) ----------
 const profileDir = () => path.join(app.getPath('home'), '.ares', 'user');
@@ -383,73 +339,12 @@ function avatarData() {
   }
   return null;
 }
-ipcMain.handle('profile:get', () => ({ avatar: avatarData(), folder: profileDir() }));
-ipcMain.handle('profile:pick-avatar', async () => {
-  const r = await dialog.showOpenDialog(win, { title: 'Choose a profile picture', properties: ['openFile'], filters: [{ name: 'Images (GIFs stay animated)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }] });
-  if (r.canceled || !r.filePaths[0]) return { canceled: true };
-  const file = r.filePaths[0];
-  fs.mkdirSync(path.dirname(avatarFile()), { recursive: true });
-  if (/\.gif$/i.test(file)) {
-    // keep GIFs as they are so they stay animated (a resize would flatten them to one frame)
-    if (fs.statSync(file).size > 8 * 1024 * 1024) return { ok: false, error: 'That GIF is larger than 8 MB. Pick a smaller one.' };
-    fs.copyFileSync(file, avatarFile('gif'));
-    try { fs.unlinkSync(avatarFile('png')); } catch {}
-    return { ok: true, avatar: avatarData() };
-  }
-  const img = nativeImage.createFromPath(file);
-  if (img.isEmpty()) return { ok: false, error: 'That file could not be read as an image.' };
-  const { width, height } = img.getSize();
-  const side = Math.min(width, height);
-  const out = img.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side }).resize({ width: 256, height: 256, quality: 'best' });
-  fs.writeFileSync(avatarFile('png'), out.toPNG());
-  try { fs.unlinkSync(avatarFile('gif')); } catch {}
-  return { ok: true, avatar: avatarData() };
-});
-ipcMain.handle('profile:clear-avatar', () => { for (const e of ['png', 'gif']) { try { fs.unlinkSync(avatarFile(e)); } catch {} } return { ok: true, avatar: null }; });
-ipcMain.handle('profile:reveal', () => { fs.mkdirSync(path.join(profileDir(), 'images'), { recursive: true }); shell.openPath(profileDir()); return true; });
 
 // ---------- IPC: agents ----------
-ipcMain.handle('brains:list', () => brains.list());
-ipcMain.handle('brains:save', (_e, b) => brains.save(b));
-ipcMain.handle('brains:delete', (_e, name) => brains.remove(name));
 // Project logo: processed here, saved in <project folder>/.ares/ (or ~/.ares/project-logos) and returned as a data URL kept on the project.
 const logoDir = (folder) => (folder && fs.existsSync(folder) ? path.join(folder, '.ares') : path.join(os.homedir(), '.ares', 'project-logos'));
-ipcMain.handle('project:pick-logo', async (_e, folder) => {
-  const r = await dialog.showOpenDialog(win, { title: 'Choose a project logo', properties: ['openFile'], filters: [{ name: 'Images (GIFs stay animated)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }] });
-  if (r.canceled || !r.filePaths[0]) return { canceled: true };
-  const file = r.filePaths[0];
-  const dir = logoDir(folder);
-  try {
-    if (/\.gif$/i.test(file)) {
-      if (fs.statSync(file).size > 1024 * 1024) return { ok: false, error: 'That GIF is larger than 1 MB. Pick a smaller one.' };
-      const buf = fs.readFileSync(file);
-      fs.mkdirSync(dir, { recursive: true });
-      try { fs.unlinkSync(path.join(dir, 'logo.png')); } catch {}
-      fs.writeFileSync(path.join(dir, 'logo.gif'), buf);
-      return { ok: true, logo: 'data:image/gif;base64,' + buf.toString('base64') };
-    }
-    const img = nativeImage.createFromPath(file);
-    if (img.isEmpty()) return { ok: false, error: 'That file could not be read as an image.' };
-    const { width, height } = img.getSize();
-    const side = Math.min(width, height);
-    const png = img.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side }).resize({ width: 128, height: 128, quality: 'best' }).toPNG();
-    fs.mkdirSync(dir, { recursive: true });
-    try { fs.unlinkSync(path.join(dir, 'logo.gif')); } catch {}
-    fs.writeFileSync(path.join(dir, 'logo.png'), png);
-    return { ok: true, logo: 'data:image/png;base64,' + png.toString('base64') };
-  } catch (e) { return { ok: false, error: String(e.message || e) }; }
-});
-ipcMain.handle('project:clear-logo', (_e, folder) => { for (const e of ['png', 'gif']) { try { fs.unlinkSync(path.join(logoDir(folder), 'logo.' + e)); } catch {} } return { ok: true }; });
-ipcMain.handle('agents:list', (_e, root) => agents.list(skillRoot(root)).map(({ file, ...a }) => a));
-ipcMain.handle('agents:save', (_e, a, root) => agents.save(a || {}, skillRoot(root)));
-ipcMain.handle('agents:delete', (_e, name, root) => agents.remove(name, skillRoot(root)));
-ipcMain.handle('agents:reveal', () => { fs.mkdirSync(agents.dir, { recursive: true }); shell.openPath(agents.dir); return true; });
-ipcMain.handle('agents:groups', () => { const { GROUPS, GROUP_LABELS } = require('./subagents'); return Object.keys(GROUPS).map((id) => ({ id, label: GROUP_LABELS[id] })); });
 
 // ---------- IPC: folders / files ----------
-ipcMain.handle('browser:open', (_e, url) => { if (!/^https?:\/\//i.test(String(url || ''))) return false; return showBrowser(String(url)); });
-ipcMain.handle('browser:close', () => { hideBrowser(); return true; });
-ipcMain.handle('browser:navigate', (_e, url) => { if (browserView && /^https?:\/\//i.test(String(url || ''))) { browserView.webContents.loadURL(String(url)); return true; } return false; });
 
 ipcMain.handle('import:chats', async () => {
   const r = await dialog.showOpenDialog(win, {
@@ -469,15 +364,6 @@ ipcMain.handle('dialog:folder', async () => {
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
-ipcMain.handle('files:pick', async (e) => {
-  const parent = BrowserWindow.fromWebContents(e.sender) || win;
-  const r = await dialog.showOpenDialog(parent, { properties: ['openFile', 'multiSelections'] });
-  if (r.canceled) return [];
-  return Promise.all(r.filePaths.map((p) => files.parseAttachment(p)));
-});
-ipcMain.handle('files:parse-buffer', (_e, name, bytes) => files.parseBuffer(name, bytes, app.getPath('temp')));
-ipcMain.handle('files:parse', (_e, paths) => Promise.all((paths || []).map((p) => files.parseAttachment(p))));
-ipcMain.handle('shell:open', (_e, p) => (p && fs.existsSync(p) ? shell.openPath(p) : null));
 
 // ---------- IPC: chat ----------
 const runs = new Map();       // requestId -> AbortController
@@ -549,25 +435,10 @@ function syncSentinel() {
 ipcMain.on('sentinel:state', (_e, info) => { sentinelInfo = info && typeof info === 'object' ? info : { state: 'off' }; syncSentinel(); });
 ipcMain.on('sentinel:level', (_e, v) => { sentinelWidget && sentinelWidget.send('sentinel:level', v); });
 ipcMain.on('sentinel:resize', (_e, h, wide) => { sentinelWidget && sentinelWidget.resize(h, wide); });
-ipcMain.handle('sentinel:current', () => sentinelInfo);
-ipcMain.handle('sentinel:action', (_e, a) => {
-  if (a === 'logs') showMain();
-  win?.webContents.send('sentinel:action', a);
-  return true;
-});
 
 // ---------- logs ----------
-require('./ipc/logs')({ ipcMain, shell, fs, logger });
 
 // ---------- voice ----------
-ipcMain.handle('voice:permission', async () => {
-  if (process.platform !== 'darwin') return 'granted';
-  try {
-    const st = systemPreferences.getMediaAccessStatus('microphone');
-    if (st === 'not-determined') return (await systemPreferences.askForMediaAccess('microphone')) ? 'granted' : 'denied';
-    return st;
-  } catch { return 'granted'; }
-});
 /** Speech to text with the provider chosen in Settings → Voice. Used by the microphone, Sentinel, Telegram and the phone web chat. */
 const STT_LANG_OK = /^(en|english)/i; // English only
 async function transcribeAudio({ audio, mime, language, hint } = {}) {
@@ -623,38 +494,8 @@ async function transcribeAudio({ audio, mime, language, hint } = {}) {
     return done(r.j);
   } catch (e) { logger.error('voice', 'Speech-to-text failed: ' + ((e && e.message) || e)); return { ok: false, error: 'Speech-to-text failed: ' + ((e && e.message) || e) }; }
 }
-ipcMain.handle('voice:transcribe', (_e, a) => transcribeAudio(a || {}));
 
 // ---------- Text-to-speech from a local or custom server (Kokoro, Piper, OpenAI-compatible /audio/speech) ----------
-ipcMain.handle('voice:speak', async (_e, { text, speed, lang } = {}) => {
-  try {
-    const st = getSettings();
-    const engine = st.ttsEngine === 'piper' ? 'piper' : 'openai';
-    const base = String(st.ttsUrl || (engine === 'piper' ? 'http://localhost:5000' : 'http://localhost:8880')).trim().replace(/\/+$/, '');
-    if (!/^https?:\/\//i.test(base)) return { ok: false, error: 'The voice server address must start with http:// or https://' };
-    const input = String(text || '').slice(0, 1500);
-    if (!input.trim()) return { ok: false, error: 'Nothing to read.' };
-    const rate = Math.min(1.6, Math.max(0.6, Number(speed) || 1));
-    const t0 = Date.now();
-    let res;
-    if (engine === 'piper') {
-      const body = { text: input, length_scale: Number((1 / rate).toFixed(2)) };
-      const pv = st.ttsVoiceEn || st.ttsVoice;
-      if (pv) body.voice = pv;
-      res = await fetch(base + '/synthesize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
-    } else {
-      res = await fetch(providersLib.joinUrl(base, 'audio/speech'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: st.ttsModel || 'kokoro', input, voice: st.ttsVoice || 'af_heart', response_format: 'wav', speed: rate }), signal: AbortSignal.timeout(60000) });
-    }
-    if (!res.ok) { const t = (await res.text().catch(() => '')).slice(0, 200); logger.error('voice', `Text-to-speech failed HTTP ${res.status}`, { detail: t }); return { ok: false, error: `Voice server answered HTTP ${res.status}: ${t || res.statusText}` }; }
-    const buf = Buffer.from(await res.arrayBuffer());
-    logger.info('voice', `Text-to-speech ${engine}: ${Math.round(buf.length / 1024)} KB in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-    return { ok: true, audio: new Uint8Array(buf), mime: res.headers.get('content-type') || 'audio/wav' };
-  } catch (e) {
-    const m = (e && e.cause && e.cause.code === 'ECONNREFUSED') ? 'The voice server is not running at that address.' : ((e && e.message) || String(e));
-    logger.error('voice', 'Text-to-speech failed: ' + m);
-    return { ok: false, error: m };
-  }
-});
 
 // ---------- Sentinel (wake phrase "Wake up", recognised offline on this computer) ----------
 const SENTINEL_MODEL_URLS = [
@@ -663,94 +504,14 @@ const SENTINEL_MODEL_URLS = [
 const sentinelFile = () => path.join(app.getPath('home'), '.ares', 'models', 'vosk-small-en.tar.gz');
 const sentinelReady = () => { try { return fs.statSync(sentinelFile()).size > 5 * 1024 * 1024; } catch { return false; } };
 let sentinelBusy = false;
-ipcMain.handle('sentinel:status', () => {
-  let size = 0; try { size = fs.statSync(sentinelFile()).size; } catch {}
-  return { ready: sentinelReady(), size, path: sentinelFile() };
-});
-ipcMain.handle('sentinel:model', () => { try { return new Uint8Array(fs.readFileSync(sentinelFile())); } catch { return null; } });
-ipcMain.handle('sentinel:delete', () => { try { fs.unlinkSync(sentinelFile()); } catch {} return { ok: true }; });
-ipcMain.handle('sentinel:download', async (e) => {
-  if (sentinelReady()) return { ok: true };
-  if (sentinelBusy) return { ok: false, error: 'The voice model is already downloading.' };
-  sentinelBusy = true;
-  logger.info('sentinel', 'Downloading the voice model');
-  logger.progress('sentinel-download', 'Download voice model', { pct: 0, detail: 'Connecting…' });
-  const file = sentinelFile(); const tmp = file + '.part';
-  let lastErr = '';
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    for (const url of SENTINEL_MODEL_URLS) {
-      try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
-        logger.info('sentinel', `Model server answered HTTP ${res.status}`, { url });
-        if (!res.ok || !res.body) { lastErr = `HTTP ${res.status}`; logger.error('sentinel', 'Model download failed: ' + lastErr, { url }); continue; }
-        const total = Number(res.headers.get('content-length')) || 0;
-        const out = fs.createWriteStream(tmp);
-        let got = 0; let last = 0;
-        const reader = res.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          got += value.length;
-          if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
-          const pct = total ? Math.round((got / total) * 100) : 0;
-          if (pct !== last) { last = pct; try { e.sender.send('sentinel:progress', pct); } catch {} logger.progress('sentinel-download', 'Download voice model', { pct, detail: `${(got / 1048576).toFixed(1)} of ${total ? (total / 1048576).toFixed(1) : '?'} MB` }); }
-        }
-        await new Promise((r, j) => out.end((err) => (err ? j(err) : r())));
-        if (got < 5 * 1024 * 1024) { lastErr = 'The download was incomplete.'; continue; }
-        fs.renameSync(tmp, file);
-        logger.progress('sentinel-download', 'Download voice model', { pct: 100, state: 'done', detail: `${(got / 1048576).toFixed(1)} MB saved` });
-        logger.info('sentinel', `Voice model downloaded (${(got / 1048576).toFixed(1)} MB)`);
-        return { ok: true };
-      } catch (err) { lastErr = (err && err.message) || String(err); logger.error('sentinel', 'Model download error: ' + lastErr); }
-    }
-    logger.progress('sentinel-download', 'Download voice model', { state: 'error', detail: lastErr });
-    try { fs.unlinkSync(tmp); } catch {}
-    return { ok: false, error: 'Could not download the voice model (' + lastErr + '). Check your internet connection and try again.' };
-  } finally { sentinelBusy = false; }
-});
 
 // ---------- Make.com ----------
 const make = createMake({ getAuth: () => ({ token: getSecret('makeToken'), zone: getSettings().makeZone }) });
-ipcMain.handle('make:save', (_e, { zone, token } = {}) => {
-  const z = cleanMakeZone(zone || getSettings().makeZone || MAKE_ZONES[0]);
-  if (!validMakeZone(z)) return { ok: false, error: 'The zone looks wrong. Use something like eu1.make.com (the address you see when you are logged in to Make).' };
-  saveSettings({ makeZone: z });
-  if (typeof token === 'string' && token.trim()) setSecret('makeToken', token.trim().replace(/^Token\s+/i, ''));
-  return { ok: true, zone: z, hasToken: !!getSecret('makeToken') };
-});
-ipcMain.handle('make:clear', () => { setSecret('makeToken', ''); return { ok: true }; });
-ipcMain.handle('make:test', async (_e, { zone, token } = {}) => {
-  const z = cleanMakeZone(zone || getSettings().makeZone);
-  const t = (typeof token === 'string' && token.trim().replace(/^Token\s+/i, '')) || getSecret('makeToken');
-  if (!validMakeZone(z)) return { ok: false, error: 'The zone looks wrong. Use something like eu1.make.com.' };
-  if (!t) return { ok: false, error: 'Paste your Make API token first.' };
-  try {
-    const tmp = createMake({ getAuth: () => ({ token: t, zone: z }) });
-    const orgs = await tmp.overview();
-    return { ok: true, orgs };
-  } catch (e) { return { ok: false, error: e.message }; }
-});
 
 // Automations page: the user's own Make scenarios. These are the user's own clicks, so they do not need the chat approval step.
 const makeReady = () => !!getSecret('makeToken');
-ipcMain.handle('make:scenarios', async () => {
-  if (!makeReady()) return { ok: false, notConnected: true, error: 'Make is not connected. Add your API token in Settings → Make.' };
-  try { return { ok: true, ...(await make.listAll()) }; } catch (e) { logger.error('make', 'Listing scenarios failed: ' + e.message); return { ok: false, error: e.message }; }
-});
-ipcMain.handle('make:toggle', async (_e, { id, active } = {}) => {
-  try { await make.actions.setActive({ id, active: !!active }); logger.info('make', `Scenario ${id} turned ${active ? 'on' : 'off'}`); return { ok: true }; } catch (e) { logger.error('make', 'Toggle failed: ' + e.message); return { ok: false, error: e.message }; }
-});
-ipcMain.handle('make:run', async (_e, { id } = {}) => {
-  try { await make.actions.run({ id }); logger.info('make', `Scenario ${id} started`); return { ok: true }; } catch (e) { logger.error('make', 'Run failed: ' + e.message); return { ok: false, error: e.message }; }
-});
-ipcMain.handle('make:logs', async (_e, { id } = {}) => {
-  try { return { ok: true, logs: await make.logs({ id, limit: 10 }) }; } catch (e) { return { ok: false, error: e.message }; }
-});
 
 const mediaDir = () => path.join(app.getPath('userData'), 'media');
-ipcMain.handle('media:load', (_e, file) => { try { return mediaGen.load(mediaDir(), file); } catch { return null; } });
-ipcMain.handle('media:reveal', (_e, file) => { try { mediaGen.load(mediaDir(), file); shell.showItemInFolder(file); } catch {} });
 
 /** Image/video generation through the providers picked in Settings → General (imageModel / videoModel = "prov:<provider>:<model>"). null when neither is set, so the tools stay hidden. */
 function mediaApi(settings, signal) {
@@ -1078,16 +839,6 @@ function openPalette() {
   // a small floating window over whatever app is in front; picking something brings Artemis up and runs it there
   palette?.toggle();
 }
-ipcMain.handle('palette:sync', (_e, snap) => { paletteSnap = { chats: Array.isArray(snap?.chats) ? snap.chats : [], actions: Array.isArray(snap?.actions) ? snap.actions : [] }; });
-ipcMain.handle('palette:get', () => paletteSnap);
-ipcMain.handle('palette:hide', () => palette?.hide());
-ipcMain.handle('palette:run', (_e, item) => {
-  palette?.hide();
-  const fresh = !win || win.isDestroyed();
-  showMain();
-  const send = () => { try { win.webContents.send('palette:run', item); } catch {} };
-  if (fresh || win.webContents.isLoading()) win.webContents.once('did-finish-load', () => setTimeout(send, 400)); else send();
-});
 function applyShortcut() {
   shortcutError = '';
   if (registeredAccel) { try { globalShortcut.unregister(registeredAccel); } catch {} registeredAccel = ''; }
@@ -1142,73 +893,18 @@ function createTray() {
   }
 }
 
-ipcMain.handle('quick:resize', (_e, mode) => quick?.resize(mode === 'chips' ? 'chips' : !!mode));
-ipcMain.handle('quick:hide', () => quick?.hide());
-ipcMain.handle('quick:keep-open', (_e, on) => quick?.keepOpen(!!on));
-ipcMain.handle('quick:handoff', (_e, chat) => {
-  showMain();
-  const send = () => win?.webContents.send('quick:import', chat);
-  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
-});
 
 // ---------- connectors (MCP) ----------
 const readMcpList = () => readJson('mcp', []);
-ipcMain.handle('mcp:status', () => mcp.status(readMcpList()));
-ipcMain.handle('mcp:list', () => readMcpList());
-ipcMain.handle('mcp:save', async (_e, list) => {
-  const clean = (Array.isArray(list) ? list : []).map((c) => ({
-    id: String(c.id || Math.random().toString(36).slice(2, 10)), name: String(c.name || 'server').slice(0, 60), type: c.type === 'http' ? 'http' : 'stdio',
-    command: String(c.command || ''), args: Array.isArray(c.args) ? c.args.map(String) : [], env: c.env && typeof c.env === 'object' ? c.env : {},
-    url: String(c.url || ''), headers: c.headers && typeof c.headers === 'object' ? c.headers : {}, oauth: c.oauth && typeof c.oauth === 'object' ? c.oauth : undefined,
-    authorizationUrl: String(c.authorizationUrl || ''), tokenUrl: String(c.tokenUrl || ''), clientId: String(c.clientId || ''), clientSecret: String(c.clientSecret || ''), scope: String(c.scope || ''), enabled: c.enabled !== false
-  }));
-  writeJson('mcp', clean);
-  await mcp.configure(clean);
-  return mcp.status(clean);
-});
-ipcMain.handle('mcp:oauth-start', async (_e, cfg) => {
-  try {
-    if (!cfg?.authorizationUrl || !cfg?.tokenUrl) throw new Error('Authorization URL and token URL are required.');
-    const state = crypto.randomBytes(24).toString('hex');
-    const redirectUri = `http://127.0.0.1:${oauthCallbackServer.address().port}/callback`;
-    const params = new URLSearchParams({ response_type: 'code', client_id: cfg.clientId || '', redirect_uri: redirectUri, state, ...(cfg.scope ? { scope: cfg.scope } : {}) });
-    shell.openExternal(`${cfg.authorizationUrl}${cfg.authorizationUrl.includes('?') ? '&' : '?'}${params.toString()}`);
-    const result = await new Promise((resolve, reject) => { oauthPending.set(state, { resolve, reject }); setTimeout(() => { if (oauthPending.delete(state)) reject(new Error('OAuth timed out.')); }, 180000); });
-    const body = new URLSearchParams({ grant_type: 'authorization_code', code: result.code, client_id: cfg.clientId || '', redirect_uri: redirectUri, ...(cfg.clientSecret ? { client_secret: cfg.clientSecret } : {}) });
-    const tokenRes = await fetch(cfg.tokenUrl, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body });
-    const token = await tokenRes.json().catch(() => ({}));
-    if (!tokenRes.ok || !token.access_token) throw new Error(token.error_description || token.error || `Token request failed (${tokenRes.status})`);
-    return { ok: true, oauth: { accessToken: token.access_token, refreshToken: token.refresh_token || '', expiresAt: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : 0 } };
-  } catch (e) { return { ok: false, error: e.message || String(e) }; }
-});
-ipcMain.handle('mcp:oauth-callback-url', () => `http://127.0.0.1:${oauthCallbackServer.address().port}/callback`);
-ipcMain.handle('mcp:oauth-open', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); return true; });
-ipcMain.handle('mcp:import', (_e, text) => { try { return { ok: true, servers: parseImport(String(text)) }; } catch (e) { return { ok: false, error: e.message }; } });
 
 const decideTool = (id, ok) => { const r = approvals.get(id); if (r) { approvals.delete(id); r(!!ok); } };
-ipcMain.handle('remote:status', () => remote.status());
-ipcMain.handle('remote:connect-telegram', (_e, token) => remote.connectTelegram(token));
-ipcMain.handle('remote:unpair', () => { remote.unpair(); return remote.status(); });
-ipcMain.handle('shell:reveal', (_e, p) => { if (p && fs.existsSync(p)) shell.showItemInFolder(p); });
 ipcMain.handle('phone:send-file', async (_e, p) => {
   const phone = remote.phone();
   if (!phone) return { ok: false, error: 'No phone paired. Pair Telegram in Settings → Phone.' };
   if (!p || !fs.existsSync(p) || !fs.statSync(p).isFile()) return { ok: false, error: 'File not found.' };
   try { await phone.sendFile(p, path.basename(p)); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; }
 });
-ipcMain.handle('sheet:load', (_e, p) => { try { return { ok: true, ...files.loadSheets(p) }; } catch (e) { return { ok: false, error: e.message }; } });
-ipcMain.handle('sheet:save', (_e, p, sheets, opts) => { try { return { ok: true, ...files.saveSheets(p, sheets, opts || {}) }; } catch (e) { return { ok: false, error: e.message }; } });
-ipcMain.handle('sheet:save-as', async (e, sheets, suggested, opts) => {
-  const win = BrowserWindow.fromWebContents(e.sender);
-  const r = await dialog.showSaveDialog(win, { defaultPath: suggested || 'table.xlsx', filters: [{ name: 'Spreadsheet', extensions: ['xlsx', 'csv', 'tsv', 'xls', 'xlsb', 'ods'] }] });
-  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-  try { return { ok: true, path: r.filePath, ...files.saveSheets(r.filePath, sheets, { ...(opts || {}), backup: false }) }; } catch (err) { return { ok: false, error: err.message }; }
-});
 function defaultFilesDir() { const docs = app.getPath('documents'); const old = path.join(docs, 'Artemis'); const d = fs.existsSync(old) ? old : path.join(docs, 'Artemis'); try { fs.mkdirSync(d, { recursive: true }); } catch {} return d; }
-ipcMain.handle('files:default-folder', () => defaultFilesDir());
-ipcMain.handle('files:preview-project', async (_e, folder, rel) => {
-  try { return await files.parseAttachment(tools.resolveSafe(folder, rel), 400000); } catch (e) { return { name: String(rel), kind: 'error', error: e.message }; }
-});
 
 
 // ---------- scheduled tasks ----------
@@ -1248,11 +944,6 @@ const scheduler = createScheduler({
   read: () => readJson('schedules', []), write: (l) => writeJson('schedules', l),
   changed: () => toWinSafe('schedule:changed', {}), run: (job) => runScheduled(job)
 });
-ipcMain.handle('schedule:list', () => scheduler.list());
-ipcMain.handle('schedule:save', (_e, job) => { try { return { ok: true, job: scheduler.save(job) }; } catch (e) { return { ok: false, error: e.message }; } });
-ipcMain.handle('schedule:toggle', (_e, id, enabled) => { scheduler.toggle(id, !!enabled); return true; });
-ipcMain.handle('schedule:delete', (_e, id) => { scheduler.remove(id); return true; });
-ipcMain.handle('schedule:run', (_e, id) => { scheduler.runNow(id); return true; });
 
 // ---------- built-in terminal ----------
 const { createTerminals } = require('./terminal');
@@ -1293,7 +984,6 @@ const termApi = {
 // ---------- notes (markdown knowledge base) ----------
 const { createNotes } = require('./notes');
 const notesStore = createNotes({ getRoot: () => getSettings().notesFolder || (fs.existsSync(path.join(app.getPath('documents'), 'Ares Notes')) ? path.join(app.getPath('documents'), 'Ares Notes') : path.join(app.getPath('documents'), 'Artemis Notes')) });
-require('./ipc/notes')({ ipcMain, dialog, shell, notesStore, readJson, writeJson, getWin: () => win });
 function openTermWindow(id, float) {
   const old = termWindows.get(id);
   if (old && !old.isDestroyed()) { old.show(); old.focus(); return old; }
@@ -1310,24 +1000,9 @@ function openTermWindow(id, float) {
   tw.on('closed', () => { if (termWindows.get(id) === tw) { termWindows.delete(id); if (!tw.__docked) terminals.close(id); } });
   return tw;
 }
-ipcMain.handle('term:open', (_e, o = {}) => terminals.open({ cols: o.cols, rows: o.rows, cwd: o.cwd }));
-ipcMain.handle('term:input', (_e, id, data) => { terminals.input(String(id), data); return true; });
-ipcMain.handle('term:resize', (_e, id, cols, rows) => { terminals.resize(String(id), cols, rows); return true; });
-ipcMain.handle('term:snapshot', (_e, id) => terminals.snapshot(String(id)));
-ipcMain.handle('term:close', (_e, id) => { const w = termWindows.get(String(id)); if (w && !w.isDestroyed()) { w.__docked = false; w.close(); } else terminals.close(String(id)); return true; });
-ipcMain.handle('term:popout', (_e, id, float) => { openTermWindow(String(id), !!float); return true; });
-ipcMain.handle('term:dock', (_e, id) => {
-  const w = termWindows.get(String(id));
-  if (w && !w.isDestroyed()) { w.__docked = true; w.close(); }
-  if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.send('term:docked', { id: String(id) }); }
-  return true;
-});
-ipcMain.handle('term:float', (e, on) => { const w = BrowserWindow.fromWebContents(e.sender); if (!w) return false; w.setAlwaysOnTop(!!on, 'floating'); return w.isAlwaysOnTop(); });
 
 // ---------- macOS permissions ----------
 const permissions = createPermissions({ systemPreferences, desktopCapturer, Notification, shell });
-ipcMain.handle('perm:status', () => permissions.status());
-ipcMain.handle('perm:request', async (_e, kind) => { await permissions.request(kind); return permissions.status(); });
 
 // ---------- Artemis as an MCP server (other apps can control Artemis) ----------
 const { createMcpServer } = require('./mcp-server');
@@ -1386,17 +1061,6 @@ const mcpServerInfo = () => {
   const st = getSettings();
   return { enabled: !!st.mcpServerEnabled, running: mcpServer.running(), alwaysAllow: !!st.mcpAlwaysAllow, port: Number(st.mcpServerPort) || 8788, token: st.mcpServerEnabled ? getSecret('mcpToken') : '', error: mcpServerError };
 };
-ipcMain.handle('mcpserver:info', () => mcpServerInfo());
-ipcMain.handle('mcpserver:set', async (_e, o = {}) => {
-  const patch = {};
-  if (typeof o.enabled === 'boolean') patch.mcpServerEnabled = o.enabled;
-  if (typeof o.alwaysAllow === 'boolean') patch.mcpAlwaysAllow = o.alwaysAllow;
-  if (o.port !== undefined) patch.mcpServerPort = Math.min(65535, Math.max(1024, parseInt(o.port, 10) || 8788));
-  saveSettings(patch);
-  if (o.resetToken) setSecret('mcpToken', require('crypto').randomBytes(24).toString('hex'));
-  await syncMcpServer();
-  return mcpServerInfo();
-});
 
 // ---------- uygulama ----------
 const gotLock = app.requestSingleInstanceLock();
@@ -1517,3 +1181,120 @@ app.whenReady().then(() => {
 });
 app.on('will-quit', () => { try { terminals.closeAll(); } catch {} scheduler.stop(); globalShortcut.unregisterAll(); remote?.stop(); mcp.close(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
+// ---------- IPC handlers that touch main's mutable state (kept here) ----------
+ipcMain.handle('browser:bounds', (_e, r) => {
+  if (!r || ![r.x, r.y, r.width, r.height].every(Number.isFinite)) return false;
+  browserRect = { x: Math.max(0, Math.round(r.x)), y: Math.max(0, Math.round(r.y)), width: Math.max(50, Math.round(r.width)), height: Math.max(50, Math.round(r.height)) };
+  if (browserView) browserView.setBounds(browserRect);
+  return true;
+});
+ipcMain.handle('browser:visible', (_e, v) => { if (browserView) browserView.setVisible(!!v); return true; });
+ipcMain.handle('browser:nav', (_e, a) => {
+  const wc = browserView && browserView.webContents; if (!wc) return false;
+  if (a === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
+  else if (a === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
+  else if (a === 'reload') wc.reload();
+  return true;
+});
+ipcMain.handle('browser:external', (_e, u) => { if (/^https?:\/\//i.test(String(u || ''))) { shell.openExternal(String(u)); return true; } return false; });
+ipcMain.handle('browser:open', (_e, url) => { if (!/^https?:\/\//i.test(String(url || ''))) return false; return showBrowser(String(url)); });
+ipcMain.handle('browser:close', () => { hideBrowser(); return true; });
+ipcMain.handle('browser:navigate', (_e, url) => { if (browserView && /^https?:\/\//i.test(String(url || ''))) { browserView.webContents.loadURL(String(url)); return true; } return false; });
+ipcMain.handle('sentinel:current', () => sentinelInfo);
+ipcMain.handle('sentinel:action', (_e, a) => {
+  if (a === 'logs') showMain();
+  win?.webContents.send('sentinel:action', a);
+  return true;
+});
+ipcMain.handle('sentinel:status', () => {
+  let size = 0; try { size = fs.statSync(sentinelFile()).size; } catch {}
+  return { ready: sentinelReady(), size, path: sentinelFile() };
+});
+ipcMain.handle('sentinel:model', () => { try { return new Uint8Array(fs.readFileSync(sentinelFile())); } catch { return null; } });
+ipcMain.handle('sentinel:delete', () => { try { fs.unlinkSync(sentinelFile()); } catch {} return { ok: true }; });
+ipcMain.handle('sentinel:download', async (e) => {
+  if (sentinelReady()) return { ok: true };
+  if (sentinelBusy) return { ok: false, error: 'The voice model is already downloading.' };
+  sentinelBusy = true;
+  logger.info('sentinel', 'Downloading the voice model');
+  logger.progress('sentinel-download', 'Download voice model', { pct: 0, detail: 'Connecting…' });
+  const file = sentinelFile(); const tmp = file + '.part';
+  let lastErr = '';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    for (const url of SENTINEL_MODEL_URLS) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+        logger.info('sentinel', `Model server answered HTTP ${res.status}`, { url });
+        if (!res.ok || !res.body) { lastErr = `HTTP ${res.status}`; logger.error('sentinel', 'Model download failed: ' + lastErr, { url }); continue; }
+        const total = Number(res.headers.get('content-length')) || 0;
+        const out = fs.createWriteStream(tmp);
+        let got = 0; let last = 0;
+        const reader = res.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          got += value.length;
+          if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
+          const pct = total ? Math.round((got / total) * 100) : 0;
+          if (pct !== last) { last = pct; try { e.sender.send('sentinel:progress', pct); } catch {} logger.progress('sentinel-download', 'Download voice model', { pct, detail: `${(got / 1048576).toFixed(1)} of ${total ? (total / 1048576).toFixed(1) : '?'} MB` }); }
+        }
+        await new Promise((r, j) => out.end((err) => (err ? j(err) : r())));
+        if (got < 5 * 1024 * 1024) { lastErr = 'The download was incomplete.'; continue; }
+        fs.renameSync(tmp, file);
+        logger.progress('sentinel-download', 'Download voice model', { pct: 100, state: 'done', detail: `${(got / 1048576).toFixed(1)} MB saved` });
+        logger.info('sentinel', `Voice model downloaded (${(got / 1048576).toFixed(1)} MB)`);
+        return { ok: true };
+      } catch (err) { lastErr = (err && err.message) || String(err); logger.error('sentinel', 'Model download error: ' + lastErr); }
+    }
+    logger.progress('sentinel-download', 'Download voice model', { state: 'error', detail: lastErr });
+    try { fs.unlinkSync(tmp); } catch {}
+    return { ok: false, error: 'Could not download the voice model (' + lastErr + '). Check your internet connection and try again.' };
+  } finally { sentinelBusy = false; }
+});
+ipcMain.handle('quick:resize', (_e, mode) => quick?.resize(mode === 'chips' ? 'chips' : !!mode));
+ipcMain.handle('quick:hide', () => quick?.hide());
+ipcMain.handle('quick:keep-open', (_e, on) => quick?.keepOpen(!!on));
+ipcMain.handle('quick:handoff', (_e, chat) => {
+  showMain();
+  const send = () => win?.webContents.send('quick:import', chat);
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
+});
+ipcMain.handle('palette:sync', (_e, snap) => { paletteSnap = { chats: Array.isArray(snap?.chats) ? snap.chats : [], actions: Array.isArray(snap?.actions) ? snap.actions : [] }; });
+ipcMain.handle('palette:get', () => paletteSnap);
+ipcMain.handle('palette:hide', () => palette?.hide());
+ipcMain.handle('palette:run', (_e, item) => {
+  palette?.hide();
+  const fresh = !win || win.isDestroyed();
+  showMain();
+  const send = () => { try { win.webContents.send('palette:run', item); } catch {} };
+  if (fresh || win.webContents.isLoading()) win.webContents.once('did-finish-load', () => setTimeout(send, 400)); else send();
+});
+ipcMain.handle('remote:status', () => remote.status());
+ipcMain.handle('remote:connect-telegram', (_e, token) => remote.connectTelegram(token));
+ipcMain.handle('remote:unpair', () => { remote.unpair(); return remote.status(); });
+
+// ---------- IPC handlers (one module per area, see electron/ipc/) ----------
+// Registered last so every helper they use is initialised; handlers only run later, when the renderer calls them.
+require('./ipc/skills')({ ipcMain, app, dialog, shell, fs, path, skills, createSkillHub, skillRoot, getWin: () => win });
+require('./ipc/themes')({ ipcMain, dialog, shell, fs, path, themes, themeDirs, listThemes, nativeThemeFor, broadcastTheme, getSettings, saveSettings, getWin: () => win });
+require('./ipc/brains')({ ipcMain, brains });
+require('./ipc/agents')({ ipcMain, agents, fs, shell, skillRoot });
+require('./ipc/logs')({ ipcMain, shell, fs, logger });
+require('./ipc/make')({ ipcMain, MAKE_ZONES, cleanMakeZone, createMake, getSecret, getSettings, logger, make, makeReady, saveSettings, setSecret, validMakeZone });
+require('./ipc/mcp')({ ipcMain, mcp, oauthCallbackServer, oauthPending, parseImport, readMcpList, shell, writeJson });
+require('./ipc/schedule')({ ipcMain, scheduler });
+require('./ipc/notes')({ ipcMain, dialog, shell, notesStore, readJson, writeJson, getWin: () => win });
+require('./ipc/term')({ ipcMain, BrowserWindow, openTermWindow, termWindows, terminals, getWin: () => win });
+require('./ipc/mcpserver')({ ipcMain, mcpServerInfo, saveSettings, setSecret, syncMcpServer });
+require('./ipc/project')({ ipcMain, dialog, fs, logoDir, nativeImage, path, getWin: () => win });
+require('./ipc/profile')({ ipcMain, avatarData, avatarFile, dialog, fs, nativeImage, path, profileDir, shell, getWin: () => win });
+require('./ipc/sheet')({ ipcMain, BrowserWindow, dialog, files });
+require('./ipc/voice')({ ipcMain, getSettings, logger, providersLib, systemPreferences, transcribeAudio });
+require('./ipc/files')({ ipcMain, BrowserWindow, app, defaultFilesDir, dialog, files, tools, getWin: () => win });
+require('./ipc/perm')({ ipcMain, permissions });
+require('./ipc/media')({ ipcMain, mediaDir, mediaGen, shell });
+require('./ipc/usage')({ ipcMain, readJson, writeJson });
+require('./ipc/providers')({ ipcMain, encStr, getProviderKey, providersLib, publicProviders, readProviderKeys, readProviders, writeJson });
+require('./ipc/shell')({ ipcMain, fs, shell });
