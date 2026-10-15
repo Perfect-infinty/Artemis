@@ -8,11 +8,25 @@ const titleOf = (p) => p.split('/').pop().replace(/\.md$/i, '');
 const wiki = (t) => t.replace(/\[\[([^\]\n|]+)(?:\|([^\]\n]+))?\]\]/g, (_m, n, label) => `[${label || n}](#note:${encodeURIComponent(n.trim())})`);
 
 /** One open note: a Markdown editor with a live preview. It saves by itself while you type. */
+// The view mode is remembered per note (and across restarts), so switching tabs and coming back keeps it.
+const MODE_KEY = 'artemis.noteModes';
+const modeMemo = new Map();
+function getMode(path) {
+  if (modeMemo.has(path)) return modeMemo.get(path);
+  try { const m = JSON.parse(localStorage.getItem(MODE_KEY) || '{}')[path]; if (m) return m; } catch {}
+  return null;
+}
+function saveMode(path, m) {
+  modeMemo.set(path, m);
+  try { const all = JSON.parse(localStorage.getItem(MODE_KEY) || '{}'); all[path] = m; localStorage.setItem(MODE_KEY, JSON.stringify(all)); } catch {}
+}
+
 export default function NoteEditor({ path, items, narrow, onOpenNote, onCreateNote }) {
   const [text, setText] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [mode, setMode] = useState(narrow ? 'edit' : 'split'); // edit | split | preview
+  const [mode, setModeState] = useState(() => getMode(path) || (narrow ? 'edit' : 'split')); // edit | split | preview
+  const setMode = (m) => { setModeState(m); saveMode(path, m); };
   const [err, setErr] = useState('');
   const timer = useRef(null);
   const cur = useRef({ path, text, dirty });
@@ -79,7 +93,7 @@ export default function NoteEditor({ path, items, narrow, onOpenNote, onCreateNo
           {['edit', 'split', 'preview'].map((m) => <button key={m} className={mode === m ? 'on' : ''} onClick={() => setMode(m)}>{m[0].toUpperCase() + m.slice(1)}</button>)}
         </div>
       </div>
-      <div className={'notes-panes ' + mode}>
+      <div className={'notes-panes mode-' + mode}>
         {mode !== 'preview' && <textarea className="notes-editor" value={loaded ? text : ''} disabled={!loaded} onChange={(e) => onEdit(e.target.value)} onKeyDown={onKeyDown} spellCheck placeholder="Write in Markdown. Link notes with [[Note name]]." />}
         {mode !== 'edit' && <div className="notes-preview" onClickCapture={onPreviewClick}><Markdown text={wiki(text)} /></div>}
       </div>
