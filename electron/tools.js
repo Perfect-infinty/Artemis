@@ -635,9 +635,13 @@ async function runTool(name, args, ctx) {
         const av = ctx.groupsAvailable();
         const want = (Array.isArray(args.names) ? args.names : [args.names]).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean);
         const ok = want.filter((g) => av.includes(g)), bad = want.filter((g) => !av.includes(g));
-        if (!ok.length) throw new Error('Unknown tool group: ' + want.join(', ') + '. Available: ' + av.join(', '));
+        const why = (g) => (g === 'phone' ? 'Telegram is not connected and paired, see Settings → Phone' : 'not available in this chat');
+        const notAvail = bad.map((g) => `${g} (${why(g)})`).join('; ');
+        if (!ok.length) throw new Error(`Not available: ${notAvail || want.join(', ')}. Do not ask for these again; carry on with the tools you have and tell the user what is missing. Available groups: ${av.join(', ') || 'none'}.`);
+        const fresh = ok.filter((g) => !ctx.activeGroups.has(g));
         ok.forEach((g) => ctx.activeGroups.add(g));
-        return { ok: true, text: `Switched on: ${ok.join(', ')}. Their tools are available now.` + (bad.length ? ` Unknown: ${bad.join(', ')}.` : '') };
+        const head = fresh.length ? `Switched on: ${fresh.join(', ')}. Their tools are available now.` : `Already switched on: ${ok.join(', ')}. Do not call use_tools again, use those tools now.`;
+        return { ok: true, text: head + (bad.length ? ` Not available: ${notAvail}. Do not ask for these again; carry on without them and tell the user.` : '') };
       }
       case 'use_connector': {
         if (!ctx.mcp || !ctx.mcp.resolveSlug) throw new Error('Connectors are not available here.');
@@ -741,7 +745,8 @@ async function runTool(name, args, ctx) {
         if (type === 'weekly') repeat.days = Array.isArray(args.days) ? args.days.map(Number) : [];
         if (type === 'monthly') repeat.dayOfMonth = Number(args.day_of_month) || 1;
         const job = ctx.schedule.save({ name: args.name, prompt: args.prompt, repeat, notifyPhone: !!args.notify_phone, reminder: !!args.reminder, allowEdits: !!args.allow_edits });
-        return { ok: true, text: `Scheduled "${job.name}" (id ${job.id}). It runs: ${ctx.schedule.list().find((j) => j.id === job.id)?.description || type}. Next run: ${job.nextRun ? new Date(job.nextRun).toLocaleString() : 'none'}.` };
+        const phoneWarn = args.notify_phone && !ctx.phone ? ' Warning: Telegram is not connected and paired, so the result will not reach the phone until the user connects it in Settings → Phone. Tell the user.' : '';
+        return { ok: true, text: `Scheduled "${job.name}" (id ${job.id}). It runs: ${ctx.schedule.list().find((j) => j.id === job.id)?.description || type}. Next run: ${job.nextRun ? new Date(job.nextRun).toLocaleString() : 'none'}.${phoneWarn}` };
       }
       case 'update_schedule': {
         if (!ctx.schedule) throw new Error('Scheduled tasks are not available here.');

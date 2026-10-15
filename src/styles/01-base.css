@@ -1,0 +1,47 @@
+:root {
+  --bg: #ffffff; --side: #f7f7f5; --panel: #ffffff; --text: #37352f; --muted: #787774;
+  --border: #e9e9e7; --accent: #2383e2; --accent-text: #fff; --hover: rgba(55,53,47,.06); --active: rgba(55,53,47,.1);
+  --user: #f7f6f3; --code: #f7f6f3; --danger: #eb5757; --ok: #448361; --warn: #cb912f;
+  --add: rgba(68,131,97,.14); --del: rgba(235,87,87,.14);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #191919; --side: #202020; --panel: #252525; --text: rgba(255,255,255,.81); --muted: rgba(255,255,255,.46);
+  --border: #2f2f2f; --accent: #2383e2; --accent-text: #fff; --hover: rgba(255,255,255,.055); --active: rgba(255,255,255,.1);
+  --user: #2b2b2b; --code: #202020; --danger: #ff7369; --ok: #4dab9a; --warn: #ffa344;
+  --add: rgba(77,171,154,.18); --del: rgba(255,115,105,.18);
+  color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #191919; --side: #202020; --panel: #252525; --text: rgba(255,255,255,.81); --muted: rgba(255,255,255,.46);
+  --border: #2f2f2f; --accent: #2383e2; --accent-text: #fff; --hover: rgba(255,255,255,.055); --active: rgba(255,255,255,.1);
+  --user: #2b2b2b; --code: #202020; --danger: #ff7369; --ok: #4dab9a; --warn: #ffa344;
+  --add: rgba(77,171,154,.18); --del: rgba(255,115,105,.18);
+  color-scheme: dark;
+}
+
+/* Themes live in JSON (electron/themes plus <userData>/themes and <project>/.ares/themes) and the renderer
+   injects one --theme-<id>-<name> variable per palette from that file, so adding a theme needs no rebuild.
+   This rule points the app variables at the chosen palette. Light and Dark stay below: they carry the OS
+   colour-scheme fallback. Note a var() with no value makes a property invalid, hence [data-vars]. */
+:root[data-vars][data-theme]:not([data-theme="light"]):not([data-theme="dark"]) {
+  --bg: var(--theme-bg); --side: var(--theme-side); --panel: var(--theme-panel); --user: var(--theme-user);
+  --code: var(--theme-code); --text: var(--theme-text); --muted: var(--theme-muted); --border: var(--theme-border);
+  --accent: var(--theme-accent); --accent-text: var(--theme-accent-text); --hover: var(--theme-hover);
+  --active: var(--theme-active); --add: var(--theme-add); --del: var(--theme-del);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: var(--fs, 14px)/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; background: transparent; }
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: .5; cursor: default; }
+input, select, textarea { font: inherit; color: var(--text); }
+.drag { -webkit-app-region: drag; }
+.nodrag, button, input, select, textarea { -webkit-app-region: no-drag; }
+.muted { color: var(--muted); } .small { font-size: 13px; } .pad { padding: 10px; }
+
+.app { display: flex; height: 100vh; }

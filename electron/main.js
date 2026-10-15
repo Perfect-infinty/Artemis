@@ -926,6 +926,7 @@ async function executeRun({ requestId, model: model0, messages, project, system,
     else if (ev.type === 'step:new') lastText = '';
     else if (ev.type === 'chunk' && !ev.agent) lastText += ev.text;
     else if (ev.type === 'error') hadError = true;
+    else if (ev.type === 'notice' && /^Stopped:/.test(String(ev.text || ''))) hadError = true; // a run that was cut short is not a model for a skill
     if (mirror) { if (ev.type === 'chunk' && !ev.agent) mSteps[mSteps.length - 1] += ev.text; else if (ev.type === 'step:new') mSteps.push(''); }
     rawSend(ev); if (usesFloat && floater?.isOpen()) floater.send(ev);
   };

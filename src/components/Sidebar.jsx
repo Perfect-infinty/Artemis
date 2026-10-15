@@ -78,8 +78,8 @@ export default function Sidebar({
   const rows = [];
   const pinnedChats = visible.filter((c) => c.pinned);
   const pinnedProjects = ql ? [] : projects.filter((p) => p.pinned);
-  if (pinnedChats.length || pinnedProjects.length) {
-    rows.push(<div key="pinned" className="group-label">Pinned</div>);
+  if (pinnedProjects.length) {
+    rows.push(<div key="pinned-projects" className="group-label">Pinned projects</div>);
     for (const p of pinnedProjects) {
       rows.push(
         <div key={'p' + p.id} className="chat-item" data-project={p.id} onClick={() => onOpenProject(p.id)}>
@@ -89,6 +89,9 @@ export default function Sidebar({
         </div>
       );
     }
+  }
+  if (pinnedChats.length) {
+    rows.push(<div key="pinned" className="group-label">Pinned chats</div>);
     for (const c of pinnedChats) {
       rows.push(
         <ChatRow key={c.id} c={c} active={view === 'chat' && c.id === currentId} status={statusOf(c)} inProject={!!c.projectId}

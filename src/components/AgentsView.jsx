@@ -1,5 +1,5 @@
 import React from 'react';
-import { AgentsTab } from './Settings.jsx';
+import { AgentsTab } from './settings/AgentsTab.jsx';
 import { liveAgents } from '../lib/agents.js';
 import { labelFor, target } from './ToolCard.jsx';
 
