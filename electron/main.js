@@ -370,38 +370,10 @@ ipcMain.handle('providers:test', (_e, p, apiKey) => {
 
 // ---------- IPC: skills ----------
 const skillRoot = (rootArg) => (rootArg && fs.existsSync(rootArg) ? rootArg : null);
-ipcMain.handle('skills:list', (_e, root) => skills.list(skillRoot(root)).map(({ dir, ...s }) => s));
-ipcMain.handle('skills:get', (_e, name, root) => { const s = skills.get(name, skillRoot(root)); if (!s) return null; const { dir, ...rest } = s; return rest; });
-ipcMain.handle('skills:save', (_e, sk, root) => skills.save({ name: sk?.name, description: sk?.description, body: sk?.body, scope: sk?.scope, by: 'user' }, skillRoot(root)));
-ipcMain.handle('skills:delete', (_e, name, root) => skills.remove(name, skillRoot(root)));
-ipcMain.handle('skills:toggle', (_e, name, on, root) => skills.setEnabled(name, !!on, skillRoot(root)));
-ipcMain.handle('skills:import', async () => {
-  const r = await dialog.showOpenDialog(win, { title: 'Choose a SKILL.md file or a skill folder', properties: ['openFile', 'openDirectory'] });
-  if (r.canceled || !r.filePaths[0]) return { canceled: true };
-  return skills.importFrom(r.filePaths[0]);
-});
-const skillHub = createSkillHub({ userDir: path.join(app.getPath('userData'), 'skills'), notify: () => { try { win?.webContents.send('skills:changed'); } catch {} } });
-ipcMain.handle('skillhub:search', (_e, o) => skillHub.search(o || {}));
-ipcMain.handle('skillhub:preview', (_e, o) => skillHub.preview(o || {}));
-ipcMain.handle('skillhub:install', (_e, o) => skillHub.install(o || {}));
-ipcMain.handle('skillhub:installed', () => skillHub.installed());
+require('./ipc/skills')({ ipcMain, app, dialog, shell, fs, path, skills, createSkillHub, skillRoot, getWin: () => win });
 // ---------- IPC: themes ----------
-ipcMain.handle('themes:list', (_e, folder) => listThemes(folder));
-ipcMain.handle('themes:folder', (_e, which) => { const d = themeDirs(); const target = which === 'user' ? d.user : d.project || d.user; fs.mkdirSync(target, { recursive: true }); return target; });
-ipcMain.handle('themes:open', async (_e, which) => { const d = themeDirs(); const target = which === 'user' ? d.user : d.project || d.user; fs.mkdirSync(target, { recursive: true }); const err = await shell.openPath(target); return err ? { ok: false, error: err } : { ok: true, folder: target }; });
-ipcMain.handle('themes:import', async (_e, folder) => {
-  const d = themeDirs();
-  const target = folder && d.project && path.resolve(folder) === path.resolve(d.project) ? d.project : d.user;
-  const picked = await dialog.showOpenDialog(win, { title: 'Import theme', filters: [{ name: 'Theme', extensions: ['json'] }], properties: ['openFile', 'multiSelections'] });
-  if (picked.canceled || !picked.filePaths.length) return null;
-  const out = themes.importFiles(picked.filePaths, { user: d.user, project: target });
-  nativeThemeFor(); broadcastTheme();
-  return out;
-});
-ipcMain.handle('themes:delete', (_e, file) => { const d = themeDirs(); const out = themes.removeFile(file, d); const id = getSettings().theme; if (!listThemes().themes.some((t) => t.id === id)) saveSettings({ theme: 'system' }); nativeThemeFor(); broadcastTheme(); return out; });
-ipcMain.handle('themes:reveal', () => { const d = themeDirs(); const target = d.project || d.user; fs.mkdirSync(target, { recursive: true }); shell.openPath(target); return target; });
+require('./ipc/themes')({ ipcMain, dialog, shell, fs, path, themes, themeDirs, listThemes, nativeThemeFor, broadcastTheme, getSettings, saveSettings, getWin: () => win });
 
-ipcMain.handle('skills:reveal', () => { fs.mkdirSync(path.join(app.getPath('userData'), 'skills'), { recursive: true }); shell.openPath(path.join(app.getPath('userData'), 'skills')); return true; });
 // ---------- IPC: profile (about you + avatar in ~/.ares/user/images) ----------
 const profileDir = () => path.join(app.getPath('home'), '.ares', 'user');
 const avatarFile = (ext = 'png') => path.join(profileDir(), 'images', `avatar.${ext}`);
@@ -585,11 +557,7 @@ ipcMain.handle('sentinel:action', (_e, a) => {
 });
 
 // ---------- logs ----------
-ipcMain.handle('logs:get', (_e, n) => ({ entries: logger.recent(Number(n) || 1000), tasks: logger.tasks(), file: logger.file() }));
-ipcMain.handle('logs:clear', () => logger.clear());
-ipcMain.handle('logs:reveal', () => { try { fs.mkdirSync(logger.dir, { recursive: true }); fs.existsSync(logger.file()) ? shell.showItemInFolder(logger.file()) : shell.openPath(logger.dir); } catch {} return true; });
-ipcMain.handle('logs:add', (_e, o = {}) => { logger.log(o.level, 'ui:' + String(o.source || 'app').slice(0, 16), o.message, o.data); return true; });
-ipcMain.handle('logs:progress', (_e, o = {}) => { if (o.id) logger.progress(String(o.id).slice(0, 60), o.label, { pct: o.pct, state: o.state, detail: o.detail }); return true; });
+require('./ipc/logs')({ ipcMain, shell, fs, logger });
 
 // ---------- voice ----------
 ipcMain.handle('voice:permission', async () => {
@@ -1325,24 +1293,7 @@ const termApi = {
 // ---------- notes (markdown knowledge base) ----------
 const { createNotes } = require('./notes');
 const notesStore = createNotes({ getRoot: () => getSettings().notesFolder || (fs.existsSync(path.join(app.getPath('documents'), 'Ares Notes')) ? path.join(app.getPath('documents'), 'Ares Notes') : path.join(app.getPath('documents'), 'Artemis Notes')) });
-const notesSafe = (fn) => async (_e, ...a) => { try { return { ok: true, ...(await fn(...a)) }; } catch (e) { return { ok: false, error: e.message }; } };
-ipcMain.handle('notes:root', () => notesStore.root());
-ipcMain.handle('notes:pickRoot', async () => {
-  const r = await dialog.showOpenDialog(win, { title: 'Choose the Notes folder', properties: ['openDirectory', 'createDirectory'] });
-  if (r.canceled || !r.filePaths[0]) return null;
-  writeJson('settings', { ...readJson('settings', {}), notesFolder: r.filePaths[0] });
-  return r.filePaths[0];
-});
-ipcMain.handle('notes:list', notesSafe(() => ({ items: notesStore.list() })));
-ipcMain.handle('notes:read', notesSafe((p) => notesStore.read(p, { max: 2e6 })));
-ipcMain.handle('notes:write', notesSafe((p, t) => notesStore.write(p, t)));
-ipcMain.handle('notes:create', notesSafe((n, f, t) => notesStore.create(n, f, t)));
-ipcMain.handle('notes:createFolder', notesSafe((n, f) => notesStore.createFolder(n, f)));
-ipcMain.handle('notes:rename', notesSafe((p, n) => notesStore.rename(p, n)));
-ipcMain.handle('notes:move', notesSafe((p, f) => notesStore.move(p, f)));
-ipcMain.handle('notes:delete', notesSafe((p) => { notesStore.remove(p); return {}; }));
-ipcMain.handle('notes:search', notesSafe((q) => ({ results: notesStore.search(q) })));
-ipcMain.handle('notes:reveal', () => { shell.openPath(notesStore.root()); return true; });
+require('./ipc/notes')({ ipcMain, dialog, shell, notesStore, readJson, writeJson, getWin: () => win });
 function openTermWindow(id, float) {
   const old = termWindows.get(id);
   if (old && !old.isDestroyed()) { old.show(); old.focus(); return old; }
