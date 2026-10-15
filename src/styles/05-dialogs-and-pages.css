@@ -143,3 +143,5 @@ html.quick, html.quick body, html.quick #root { background: transparent; }
 .hw-tiles button { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; text-align: left; }
 .hw-tiles button:hover { border-color: var(--accent); }
 .hw-tiles .count { margin-left: auto; }
+
+.home-pills { margin-bottom: 8px; }

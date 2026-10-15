@@ -1153,11 +1153,18 @@ export default function App() {
     if (k === 'sentinel') { toggleSentinel(); return; }
     sideApi.current.goNav(k);
   };
+  const startHomeChat = (text, atts, d = {}) => {
+    const c = { id: uid(), title: 'New chat', model: d.model || defaultModel(settings, providers), projectId: d.projectId || null, messages: [], updatedAt: Date.now(),
+      ...(d.brain !== undefined ? { brain: d.brain } : {}), ...(d.tools ? { tools: d.tools } : {}), ...(d.agents ? { agents: d.agents } : {}), ...(d.perm ? { perm: d.perm } : {}) };
+    setChats((cs) => [c, ...cs]);
+    select(c.id);
+    sendTo(c, text, atts);
+  };
   const homePage = (
     <HomeView chats={chats} projects={projects} notes={notes} settings={settings} memoryCount={settings.memoryEnabled ? memory.length : 0} connectorCount={connectorCount}
       sentinel={sent.state} agentCount={liveAgents(chats, runningIds).length} statusOf={statusOf}
-      onSend={startProjectChat(null)} onOpenChat={select} onOpenProject={(id) => setView({ project: id })} onOpenNote={(p) => noteActions.open(p)} onGo={homeGo}
-      composerProps={{ settings, onUsageDetails: () => setModal('usage'), onOpenSettings: (t) => { setSettingsTab(t || 'general'); setModal('settings'); } }} />
+      onSend={startHomeChat} onOpenChat={select} onOpenProject={(id) => setView({ project: id })} onOpenNote={(p) => noteActions.open(p)} onGo={homeGo}
+      composerProps={{ settings, brains, groups, defaultModel: defaultModel(settings, providers), onUsageDetails: () => setModal('usage'), onOpenSettings: (t) => { setSettingsTab(t || 'general'); setModal('settings'); } }} />
   );
   // What a page shows, in the main pane or (split = true) in the second half of a split view
   const renderPage = (kind, split) => {

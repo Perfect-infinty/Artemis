@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import Composer from './Composer.jsx';
+import Composer, { ChatPills } from './Composer.jsx';
 import { dayGroup } from '../lib/history.js';
 import { costOf, fmtUsd } from '../lib/cost.js';
 
@@ -19,6 +19,11 @@ function Widget({ title, icon, action, onAction, children, wide }) {
 
 // The Home page: a chat box plus small widgets for everything in the app.
 export default function HomeView({ chats, projects, notes, settings, memoryCount, connectorCount, sentinel, agentCount, statusOf, onSend, onOpenChat, onOpenProject, onOpenNote, onGo, composerProps }) {
+  const [draft, setDraft] = useState({}); // choices for the chat that the box below starts
+  const up = (patch) => setDraft((d) => ({ ...d, ...patch }));
+  const cp = composerProps || {};
+  const brain = draft.brain !== undefined ? draft.brain : (settings.defaultBrain || '');
+  const model = draft.model || cp.defaultModel;
   const [jobs, setJobs] = useState([]);
   const [usage, setUsage] = useState(null);
   useEffect(() => {
@@ -46,7 +51,19 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
     <div className="page home-page">
       <h1 className="home-title">{greet()}{name ? ', ' + name : ''}</h1>
       <div className="home-compose">
-        <Composer key="home" streaming={false} onStop={() => {}} onSend={onSend} placeholder="Ask anything, start a new chat…" {...composerProps} />
+        <div className="home-pills">
+          <ChatPills stacked={false} brains={cp.brains || []} brain={brain} onBrain={(v) => { const b = (cp.brains || []).find((x) => x.slug === v); up({ brain: v, ...(b && b.model ? { model: b.model } : {}) }); }}
+            tools={draft.tools || (settings.toolsEnabled === false ? 'off' : 'on')} onTools={(v) => up({ tools: v })}
+            agents={draft.agents || (settings.delegateEnabled === false ? 'off' : 'on')} onAgents={(v) => up({ agents: v })}
+            perm={draft.perm || (settings.autoApproveEdits ? 'auto' : 'ask')} onPerm={(v) => up({ perm: v })}
+            projectId={draft.projectId || null} projects={projects} onProject={(id) => up({ projectId: id })}
+            model={model} settings={settings} onUsageDetails={cp.onUsageDetails} onOpenSettings={cp.onOpenSettings} />
+        </div>
+        <Composer key="home" streaming={false} onStop={() => {}} onSend={(t, a) => { onSend(t, a, { ...draft, brain, model }); setDraft({}); }} placeholder="Ask anything, start a new chat…"
+          model={model} onModel={(m) => up({ model: m })} groups={cp.groups || []} projects={projects} projectId={draft.projectId || null} onProject={(id) => up({ projectId: id })}
+          settings={settings} onUsageDetails={cp.onUsageDetails} onOpenSettings={cp.onOpenSettings}
+          tools={draft.tools || 'on'} onTools={(v) => up({ tools: v })} agents={draft.agents || 'on'} onAgents={(v) => up({ agents: v })}
+          brains={cp.brains || []} brain={brain} onBrain={(v) => up({ brain: v })} />
       </div>
 
       <div className="hw-grid">
