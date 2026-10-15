@@ -240,11 +240,13 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
       // typing while an answer is being written queues the message; an empty box stops the answer
       if (!text.trim() && !good.length) return onStop();
       if (!onQueue) return onStop();
+      drafts.delete(chatId);
       onQueue(text.trim(), good);
       setText(''); setAtts([]);
       return;
     }
     if (!text.trim() && !good.length) return;
+    drafts.delete(chatId); // the box may be unmounted by onSend (Home opens the new chat), so its effect would never clear the saved draft
     onSend(text.trim(), good);
     setText(''); setAtts([]);
   };
