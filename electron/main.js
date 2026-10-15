@@ -978,7 +978,12 @@ const termApi = {
     while (Date.now() - t0 < waitMs && Date.now() - (termLast.get(id) || 0) < 700) await sleep(150);
     return tailLines(id, 80);
   },
-  async read(n, waitMs) { const id = ensureAgentTerm(); if (waitMs) await sleep(waitMs); return tailLines(id, n); }
+  // Waits at most waitMs, but returns as soon as the terminal has been quiet for 2 s: a command that already finished must not keep the tool "running" for the whole wait.
+  async read(n, waitMs) {
+    const id = ensureAgentTerm();
+    if (waitMs) { const t0 = Date.now(); while (Date.now() - t0 < waitMs && Date.now() - (termLast.get(id) || 0) < 2000) await sleep(200); }
+    return tailLines(id, n);
+  }
 };
 
 // ---------- notes (markdown knowledge base) ----------
