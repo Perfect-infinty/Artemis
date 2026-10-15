@@ -6,6 +6,13 @@
 .new-chat:hover, .side-btn:hover { background: var(--hover); }
 .section-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 8px 6px 0; }
 .projects { display: flex; flex-direction: column; gap: 1px; max-height: 190px; overflow-y: auto; }
+/* Menu rows (New, Sentinel, Projects, ... and everything under More) use the same size and colour as chat rows */
+.nav-item { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 8px; line-height: 1; text-align: left; border: 0; background: transparent; border-radius: 7px; font-size: 13px; color: var(--text); cursor: pointer; }
+.nav-item > svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.nav-item:hover { background: var(--hover); }
+.nav-item .count { margin-left: auto; font-size: 11px; color: var(--muted); }
+.nav-ico.new { width: 15px; height: 15px; flex: none; border-radius: 50%; background: var(--active); display: inline-grid; place-items: center; }
+.nav-ico.new svg { width: 11px; height: 11px; color: var(--text); }
 /* Sidebar rows: chats, pinned projects, notes and project headers all share one size */
 .proj, .chat-item { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 8px; border-radius: 7px; cursor: pointer; font-size: 13px; }
 .chat-item > svg.row-icon { width: 15px; height: 15px; flex: none; }

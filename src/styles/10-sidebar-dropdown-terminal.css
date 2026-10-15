@@ -2,13 +2,7 @@
 .sidebar { padding: 8px 10px 10px; gap: 0; }
 .side-search { margin: 0 0 10px; }
 .side-nav { gap: 2px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
-.nav-item { height: 34px; padding: 0 10px; gap: 12px; line-height: 1; }
-.nav-item > svg { width: 18px; height: 18px; margin: 0 1px; }
-.nav-ico.new { width: 20px; height: 20px; margin: 0; flex: none; }
-.nav-ico.new svg { width: 13px; height: 13px; margin: 0; }
-.nav-item .count { margin-left: auto; }
-.nav-more { gap: 2px; margin: 2px 0 4px; }
-.nav-item.sub { padding-left: 10px; height: 32px; }
+.nav-more { gap: 1px; margin: 1px 0 4px; }
 .chat-list { margin-top: 6px; gap: 1px; padding-right: 2px; }
 .side-foot { margin-top: 6px; padding: 10px 2px 0; }
 
