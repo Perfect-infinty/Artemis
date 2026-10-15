@@ -8,9 +8,9 @@ const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1
 const greet = () => { const h = new Date().getHours(); return h < 5 ? 'Working late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 const when = (t) => { if (!t) return ''; const d = new Date(t); const same = d.toDateString() === new Date().toDateString(); return (same ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
 
-function Widget({ title, icon, action, onAction, children, wide }) {
+function Widget({ title, icon, action, onAction, children, wide, span2 }) {
   return (
-    <section className={'hw' + (wide ? ' wide' : '')}>
+    <section className={"hw" + (wide ? " wide" : "") + (span2 ? " span2" : "")}>
       <header className="hw-head"><Icon name={icon} size={15} /> <span>{title}</span>{action && <button className="link-btn hw-act" onClick={onAction}>{action}</button>}</header>
       <div className="hw-body">{children}</div>
     </section>
@@ -109,7 +109,7 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
           )}
         </Widget>
 
-        <Widget title="Shortcuts" icon="bolt" wide>
+        <Widget title="Shortcuts" icon="bolt" span2>
           <div className="hw-tiles">
             <button onClick={() => onGo('sentinel')}><Icon name="mic" size={16} /> Sentinel <span className="muted small">{sentinel === 'off' ? 'Off' : 'On'}</span></button>
             <button onClick={() => onGo('agents')}><Icon name="user" size={16} /> Agents{agentCount ? <span className="count">{agentCount} running</span> : null}</button>

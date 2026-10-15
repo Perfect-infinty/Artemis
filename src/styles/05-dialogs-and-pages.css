@@ -145,3 +145,6 @@ html.quick, html.quick body, html.quick #root { background: transparent; }
 .hw-tiles .count { margin-left: auto; }
 
 .home-pills { margin-bottom: 8px; }
+.hw.span2 { grid-column: span 2; }
+.hw.span2 .hw-tiles { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+@media (max-width: 900px) { .hw.span2 { grid-column: 1 / -1; } }
