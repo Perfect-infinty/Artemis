@@ -28,7 +28,7 @@ const { pruneImages } = require('../electron/agent');
   await new Promise((r) => ddgSrv.listen(0, '127.0.0.1', r));
   const sr = await web.webSearch('x', { ddgUrl: `http://127.0.0.1:${ddgSrv.address().port}/` });
   assert(sr.includes('https://example.com/p'));
-  const sf = await web.webSearch('x', { ddgUrl: 'http://127.0.0.1:1/', fallback: async () => 'fallback answer' });
+  const sf = await web.webSearch('x', { ddgUrl: 'http://127.0.0.1:1/', bingUrl: 'http://127.0.0.1:1/', fallback: async () => 'fallback answer' });
   assert(sf.includes('fallback answer'));
   srv.close(); ddgSrv.close();
 
@@ -116,5 +116,15 @@ const { pruneImages } = require('../electron/agent');
   assert(names({ webEnabled: true }).includes('web_search') && !names({}).includes('web_search'));
   assert(names({ computerEnabled: true }).includes('computer') && names({ shellEnabled: true }).includes('run_command'));
 
+  // Bing is the second try when DuckDuckGo gives nothing; its wrapped links are unwrapped
+  const real = 'https://example.org/a?b=1';
+  const wrapped = 'https://www.bing.com/ck/a?!&&p=x&u=a1' + Buffer.from(real).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_') + '&ntb=1';
+  const bingHtml = `<ol><li class="b_algo" data-id><h2><a href="${wrapped.replace(/&/g, '&amp;')}" h="ID=1">Bing &amp; One</a></h2><div class="b_caption"><p>bing snip</p></div></li><li class="b_algo"><h2><a href="https://example.net/x">Two</a></h2></li></ol>`;
+  assert.deepStrictEqual(web.parseBing(bingHtml), [{ title: 'Bing & One', url: real, snippet: 'bing snip' }, { title: 'Two', url: 'https://example.net/x', snippet: '' }]);
+  const bingSrv = require('http').createServer((q, r) => { r.setHeader('content-type', 'text/html'); r.end(bingHtml); });
+  await new Promise((r) => bingSrv.listen(0, '127.0.0.1', r));
+  const sb = await web.webSearch('x', { ddgUrl: 'http://127.0.0.1:1/', bingUrl: `http://127.0.0.1:${bingSrv.address().port}/` });
+  bingSrv.close();
+  assert(/Bing & One/.test(sb) && sb.includes(real), sb);
   console.log('extra: all tests passed');
 })().catch((e) => { console.error('FAILED:', e); process.exit(1); });

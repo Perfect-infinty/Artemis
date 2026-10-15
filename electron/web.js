@@ -102,7 +102,32 @@ function parseDdg(html) {
   return results;
 }
 
-async function webSearch(query, { signal, max = 8, fallback, ddgUrl = 'https://html.duckduckgo.com/html/' } = {}) {
+/** Bing wraps result links as bing.com/ck/a?...&u=a1<base64url of the real URL>; give back the real URL. */
+function bingTarget(href) {
+  try {
+    const u = new URL(href);
+    if (/(^|\.)bing\.com$/.test(u.hostname) && u.pathname.startsWith('/ck/')) {
+      const v = u.searchParams.get('u') || '';
+      if (/^a1/.test(v)) { const d = Buffer.from(v.slice(2).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); if (/^https?:\/\//.test(d)) return d; }
+    }
+  } catch {}
+  return href;
+}
+function parseBing(html) {
+  const results = [];
+  const blocks = String(html).split(/<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>/i).slice(1);
+  for (const b of blocks) {
+    const m = /<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(b);
+    if (!m) continue;
+    const url = bingTarget(decodeEntities(m[1]));
+    if (!/^https?:/.test(url)) continue;
+    const sn = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(b);
+    results.push({ title: decodeEntities(m[2].replace(/<[^>]+>/g, '')).trim(), url, snippet: sn ? decodeEntities(sn[1].replace(/<[^>]+>/g, '')).trim() : '' });
+  }
+  return results;
+}
+
+async function webSearch(query, { signal, max = 8, fallback, ddgUrl = 'https://html.duckduckgo.com/html/', bingUrl = 'https://www.bing.com/search' } = {}) {
   let results = [], failure = null;
   try {
     const res = await fetch(ddgUrl, {
@@ -118,6 +143,12 @@ async function webSearch(query, { signal, max = 8, fallback, ddgUrl = 'https://h
   } catch (e) {
     if (e.name === 'AbortError' && signal?.aborted) throw e;
     failure = e.message;
+  }
+  if (!results.length) { // DuckDuckGo refuses scripts now and then: Bing's plain result page is the second try
+    try {
+      const res = await fetch(bingUrl + '?setlang=en&q=' + encodeURIComponent(query), { headers: { 'user-agent': UA, 'accept-language': 'en-US,en;q=0.9' }, signal: withTimeout(signal, 15000) });
+      if (res.ok) results = parseBing(await res.text());
+    } catch (e) { if (e.name === 'AbortError' && signal?.aborted) throw e; }
   }
   if (results.length) {
     return results.slice(0, max).map((r, n) => `${n + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
@@ -144,4 +175,4 @@ async function endpointSearch({ baseUrl, key, query, signal, model = 'perplexity
   return text + cites;
 }
 
-module.exports = { webFetch, webSearch, endpointSearch, htmlToText, parseDdg, isPrivateHost };
+module.exports = { webFetch, webSearch, endpointSearch, htmlToText, parseDdg, parseBing, isPrivateHost };
