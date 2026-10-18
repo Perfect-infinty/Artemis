@@ -8,3 +8,4 @@ release
 .rename-backup/
 .piper-voices/
 *.log
+vite.config.mjs.timestamp-*

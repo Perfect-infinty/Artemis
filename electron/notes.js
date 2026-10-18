@@ -78,8 +78,11 @@ function createNotes({ getRoot }) {
     const isDir = fs.statSync(abs).isDirectory();
     const nm = cleanName(newName); if (!nm) throw new Error('Empty name.');
     const to = path.join(path.dirname(abs), isDir ? nm : withExt(nm));
-    if (to !== abs && fs.existsSync(to)) throw new Error('A file with that name already exists.');
-    fs.renameSync(abs, to);
+    // on a case-insensitive disk (macOS, Windows) "Artemis" -> "artemis" points at the very same entry: that is a rename, not a clash
+    let same = false;
+    if (to !== abs && fs.existsSync(to)) { try { const a = fs.statSync(abs), b = fs.statSync(to); same = a.ino === b.ino && a.dev === b.dev; } catch {} }
+    if (to !== abs && fs.existsSync(to) && !same) throw new Error('A file with that name already exists.');
+    if (same) { const tmp = abs + '.rename-' + Date.now(); fs.renameSync(abs, tmp); fs.renameSync(tmp, to); } else fs.renameSync(abs, to);
     return { path: relOf(to) };
   }
 
@@ -118,7 +121,61 @@ function createNotes({ getRoot }) {
     return res.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
-  return { root, list, read, write, create, createFolder, rename, move, remove, search };
+  // Link graph: every note, plus an edge per [[link]] / ![[embed]]. Links to notes that don't exist become "ghost" nodes.
+  const LINK_RE = /!?\[\[([^\]\n|]+)(?:\|[^\]\n]*)?\]\]/g;
+  function graph() {
+    const files = list().filter((f) => !f.dir);
+    const byName = new Map(), byPath = new Map();
+    for (const f of files) { if (!byName.has(f.name.toLowerCase())) byName.set(f.name.toLowerCase(), f); byPath.set(f.path.replace(/\.(md|markdown|txt)$/i, '').toLowerCase(), f); }
+    const nodes = files.map((f) => ({ id: f.path, path: f.path, name: f.name, exists: true }));
+    const ghosts = new Map(), edges = [];
+    for (const f of files) {
+      let text = '';
+      try { text = fs.readFileSync(safe(f.path), 'utf8'); } catch { continue; }
+      const seen = new Set();
+      for (const m of text.matchAll(LINK_RE)) {
+        const t = m[1].trim(), key = t.toLowerCase().replace(/\.md$/, '');
+        if (!t || seen.has(key)) continue;
+        seen.add(key);
+        const hit = byName.get(key) || byPath.get(key);
+        if (hit) { if (hit.path !== f.path) edges.push({ from: f.path, to: hit.path }); }
+        else {
+          if (!ghosts.has(key)) ghosts.set(key, { id: 'ghost:' + key, path: '', name: t, exists: false });
+          edges.push({ from: f.path, to: 'ghost:' + key });
+        }
+      }
+    }
+    return { nodes: [...nodes, ...ghosts.values()], edges };
+  }
+
+  // Files dropped or pasted into a note are saved next to it (images, PDFs, ...), so a relative link keeps working.
+  const MAX_ASSET = 25 * 1024 * 1024;
+  const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+  function saveAsset(rel, name, base64) {
+    const dirAbs = path.dirname(safe(rel));
+    const buf = Buffer.from(String(base64 || ''), 'base64');
+    if (!buf.length) throw new Error('Empty file.');
+    if (buf.length > MAX_ASSET) throw new Error('File is too large (25 MB max).');
+    const clean = cleanName(name).replace(/\s+/g, '-') || 'file';
+    const ext = path.extname(clean), stem = clean.slice(0, clean.length - ext.length) || 'file';
+    let n = clean, i = 2;
+    while (fs.existsSync(path.join(dirAbs, n))) n = `${stem}-${i++}${ext}`;
+    fs.mkdirSync(dirAbs, { recursive: true });
+    fs.writeFileSync(path.join(dirAbs, n), buf);
+    return { name: n, path: relOf(path.join(dirAbs, n)) };
+  }
+  function readAsset(rel, link) {
+    let l = String(link || ''); try { l = decodeURI(l); } catch {}
+    const target = l.startsWith('/') ? l.replace(/^\/+/, '') : path.posix.join(path.posix.dirname(String(rel).replace(/\\/g, '/')), l);
+    const abs = safe(target);
+    const mime = MIME[path.extname(abs).slice(1).toLowerCase()];
+    if (!mime) throw new Error('Unsupported file type.');
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error('File not found.');
+    if (fs.statSync(abs).size > MAX_ASSET) throw new Error('File is too large to preview.');
+    return { url: `data:${mime};base64,${fs.readFileSync(abs).toString('base64')}` };
+  }
+
+  return { root, list, read, write, create, createFolder, rename, move, remove, search, graph, saveAsset, readAsset };
 }
 
 module.exports = { createNotes };

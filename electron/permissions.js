@@ -6,7 +6,8 @@ const PANES = {
   screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
   accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
-  notifications: 'x-apple.systempreferences:com.apple.Notifications-Settings.extension'
+  notifications: 'x-apple.systempreferences:com.apple.Notifications-Settings.extension',
+  camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera'
 };
 
 const INFO = [
@@ -14,7 +15,9 @@ const INFO = [
   { id: 'screen', title: 'Screen Recording', why: 'Lets Artemis see your screen when you ask it to use the computer.' },
   { id: 'accessibility', title: 'Accessibility', why: 'Lets Artemis click, type and read buttons in other apps.' },
   { id: 'automation', title: 'Automation (System Events)', why: 'Lets Artemis press keys and list on-screen controls.' },
-  { id: 'notifications', title: 'Notifications', why: 'Lets scheduled tasks tell you when they finish.' }
+  { id: 'notifications', title: 'Notifications', why: 'Lets scheduled tasks tell you when they finish.' },
+  { id: 'camera', title: 'Camera', why: 'Takes one photo of whoever fails to unlock Artemis, for the Telegram alert (Settings → Security). It stays off unless you turn that on.' },
+  { id: 'touchid', title: 'Touch ID', why: 'Unlocks Artemis and confirms sensitive actions (Settings → Security). Needs a Mac with Touch ID and a fingerprint set up.' }
 ];
 
 function createPermissions({ systemPreferences, desktopCapturer, Notification, shell, platform = process.platform, run = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, { timeout: 15000 }, (e, so, se) => (e ? rej(Object.assign(e, { stderr: se })) : res(so)))) }) {
@@ -32,7 +35,9 @@ function createPermissions({ systemPreferences, desktopCapturer, Notification, s
     const accessibility = systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'denied';
     // Automation can only be probed by trying; keep the probe silent (it may show the macOS prompt once)
     const automation = await automationStatus(false);
-    return { supported: true, items: INFO.map((i) => ({ ...i, status: { microphone, screen, accessibility, automation, notifications: Notification.isSupported() ? 'unknown' : 'denied' }[i.id] })) };
+    const camera = systemPreferences.getMediaAccessStatus('camera');
+    let touchid = 'unavailable'; try { if (typeof systemPreferences.canPromptTouchID === 'function' && systemPreferences.canPromptTouchID()) touchid = 'available'; } catch {}
+    return { supported: true, items: INFO.map((i) => ({ ...i, status: { microphone, screen, accessibility, automation, camera, touchid, notifications: Notification.isSupported() ? 'unknown' : 'denied' }[i.id] })) };
   }
 
   async function request(kind) {
@@ -48,6 +53,12 @@ function createPermissions({ systemPreferences, desktopCapturer, Notification, s
       if (!systemPreferences.isTrustedAccessibilityClient(true)) await shell.openExternal(PANES.accessibility);
     } else if (kind === 'automation') {
       if ((await automationStatus(true)) !== 'granted') await shell.openExternal(PANES.automation);
+    } else if (kind === 'camera') {
+      let ok = systemPreferences.getMediaAccessStatus('camera') === 'granted';
+      if (!ok && systemPreferences.getMediaAccessStatus('camera') === 'not-determined' && systemPreferences.askForMediaAccess) { try { ok = !!(await systemPreferences.askForMediaAccess('camera')); } catch {} }
+      if (!ok) await shell.openExternal(PANES.camera);
+    } else if (kind === 'touchid') {
+      try { if (typeof systemPreferences.promptTouchID === 'function') await systemPreferences.promptTouchID('check that Touch ID works with Artemis'); } catch {}
     } else if (kind === 'notifications') {
       try { new Notification({ title: 'Artemis', body: 'Notifications are working.' }).show(); } catch {}
       await shell.openExternal(PANES.notifications);

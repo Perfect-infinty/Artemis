@@ -28,11 +28,13 @@ const PRESETS = [
   { key: 'custom', name: 'Custom (OpenAI-compatible)', needsKey: false, baseUrl: '', hint: 'Any server that implements /v1/chat/completions.', models: [] }
 ];
 
-/** Join a base URL and an API path so a base with or without a trailing /v1 both work. */
+/** Join a base URL and an API path. /v1 is added only to a bare host (no path); a base with its own path (/v1, /v1beta/openai, /api/v3, ...) is used as is. */
 function joinUrl(base, p) {
   const b = String(base || '').trim().replace(/\/+$/, '');
   const tail = String(p || '').replace(/^\/+/, '').replace(/^v1\//, '');
-  return /\/v1$/.test(b) ? `${b}/${tail}` : `${b}/v1/${tail}`;
+  let pathname = '';
+  try { pathname = new URL(b).pathname; } catch { pathname = b.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, ''); }
+  return !pathname || pathname === '/' ? `${b}/v1/${tail}` : `${b}/${tail}`;
 }
 
 const prefixId = (pid, model) => `${PREFIX}${pid}:${model}`;

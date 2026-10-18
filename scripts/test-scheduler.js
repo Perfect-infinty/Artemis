@@ -37,5 +37,14 @@ assert.strictEqual(describe({ repeat: { type: 'interval', every: 120 } }), 'Ever
   assert.strictEqual(s.list().find((j) => j.id === a.id).nextRun, t + 3600000); // running by hand does not change the schedule
   s.toggle(a.id, false); assert.strictEqual(s.list().find((j) => j.id === a.id).nextRun, null);
   s.remove(a.id); assert.ok(!s.list().some((j) => j.id === a.id));
+  // one-time jobs in the past are rejected, and a stale one is switched off once instead of rewritten every tick
+  assert.throws(() => s.save({ name: 'Old', prompt: 'x', repeat: { type: 'once', date: '2026-10-01', at: '12:00' } }), /already passed/);
+  assert.ok(s.save({ name: 'Old off', prompt: 'x', enabled: false, repeat: { type: 'once', date: '2026-10-01', at: '12:00' } }).id);
+  let writes = 0;
+  store = [{ id: 'old', name: 'Old', prompt: 'x', enabled: true, nextRun: null, repeat: { type: 'once', date: '2026-10-01', at: '12:00' } }];
+  const s2 = createScheduler({ read: () => store, write: (l) => { writes++; store = l; }, now: () => t, run: async () => ({ ok: true }) });
+  s2.tick(); s2.tick(); s2.tick();
+  assert.strictEqual(writes, 1); assert.strictEqual(store[0].enabled, false);
+  s2.toggle('old', true); assert.strictEqual(store[0].enabled, false, 'cannot switch on a past one-time job');
   console.log('scheduler: all tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });

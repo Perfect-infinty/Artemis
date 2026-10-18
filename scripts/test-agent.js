@@ -40,7 +40,7 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
       }
       if (mode === 'groups') {
         const names = (b.tools || []).map((t) => t.function.name);
-        if (!names.includes('run_command')) return sse(res, [delta({ tool_calls: [{ index: 0, id: 'g1', function: { name: 'use_tools', arguments: '{"names":["shell"]}' } }] }), delta({}, 'tool_calls')]);
+        if (!names.includes('generate_image')) return sse(res, [delta({ tool_calls: [{ index: 0, id: 'g1', function: { name: 'use_tools', arguments: '{"names":["media"]}' } }] }), delta({}, 'tool_calls')]);
         return sse(res, [delta({ content: 'groups ok' }, 'stop')]);
       }
       if (mode === 'trim') return sse(res, [delta({ content: 'trim ok' }, 'stop')]);
@@ -118,7 +118,7 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   };
 
   // 1) normal flow: tool call → approval → result → final answer
-  await runAgent({ ...base, messages: [{ role: 'user', content: 'yaz' }] });
+  await runAgent({ ...base, messages: [{ role: 'user', content: 'write it' }] });
   assert.strictEqual(requests[0].auth, 'Bearer sk_test');
   assert.strictEqual(requests[0].url, '/v1/chat/completions');
   assert(requests[0].body.tools.some((t) => t.function.name === 'write_file'));
@@ -141,10 +141,10 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   // the system prompt must contain the current memory in the second turn
   assert(requests[1].body.messages[0].content.includes('Berlin'));
 
-  // 2) reddedilen onay
+  // 2) denied approval
   requests.length = 0; events.length = 0; mem.length = 0;
   fs.rmSync(path.join(root, 'a'), { recursive: true });
-  await runAgent({ ...base, approve: async () => false, messages: [{ role: 'user', content: 'yaz' }] });
+  await runAgent({ ...base, approve: async () => false, messages: [{ role: 'user', content: 'write it' }] });
   assert(!fs.existsSync(path.join(root, 'a/b.txt')));
   assert(events.find((e) => e.type === 'tool:result' && e.id === 'c1').denied);
 
@@ -224,13 +224,14 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   assert.strictEqual(events.filter((e) => e.type === 'chunk').map((e) => e.text).join(''), 'lazy ok');
   // with lazy off everything is sent at once
   requests.length = 0; events.length = 0; mode = 'cap';
-  // 3b4) heavy tool groups (shell here) are sent only after use_tools
+  // 3b4) heavy tool groups (media here) are sent only after use_tools; the shell (terminal) is always on
   mode = 'groups'; requests.length = 0; events.length = 0;
-  await runAgent({ ...base, shellEnabled: true, lazyTools: true, messages: [{ role: 'user', content: 'ls' }] });
+  await runAgent({ ...base, shellEnabled: true, media: {}, lazyTools: true, messages: [{ role: 'user', content: 'draw' }] });
   const g0 = requests[0].body.tools.map((t) => t.function.name), g1 = requests[1].body.tools.map((t) => t.function.name);
-  assert(g0.includes('use_tools') && !g0.includes('run_command'), 'shell tool hidden at first');
-  assert(g1.includes('run_command') && !g1.includes('use_tools'), 'shell tool on after use_tools');
-  assert(/More tools are switched on only when needed: shell/.test(requests[0].body.messages[0].content));
+  assert(g0.includes('use_tools') && !g0.includes('generate_image'), 'media tool hidden at first');
+  assert(g0.includes('run_command'), 'shell tools are never lazy');
+  assert(g1.includes('generate_image') && !g1.includes('use_tools'), 'media tool on after use_tools');
+  assert(/More tools are switched on only when needed: media/.test(requests[0].body.messages[0].content));
   assert.strictEqual(events.filter((e) => e.type === 'chunk').map((e) => e.text).join(''), 'groups ok');
   // off: everything at once, no use_tools
   mode = 'trim'; requests.length = 0; events.length = 0;
@@ -267,10 +268,13 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   const rd = sent2.find((m) => m.role === 'tool' && m.tool_call_id === 's0');
   assert(rd.content.length < 300 && /a\.js/.test(rd.content), 'stale read cleared: ' + rd.content);
   assert(!JSON.stringify(sent2).includes('ooooooo') && /_omitted/.test(JSON.stringify(sent2)), 'applied edit arguments dropped');
-  // 3b-3) task_note stays in the system prompt at every step
+  // 3b-3) task_note comes back at every step, on the last message (not in the cached system prompt)
   mode = 'note'; requests.length = 0; events.length = 0;
   await runAgent({ ...base, messages: [{ role: 'user', content: 'plan it' }] });
-  assert(requests.length >= 2 && !/plan A/.test(requests[0].body.messages[0].content) && /plan A: do X then Y/.test(requests[1].body.messages[0].content), 'task note comes back in the system prompt');
+  const lastOf = (r) => JSON.stringify(r.body.messages[r.body.messages.length - 1].content);
+  assert(requests.length >= 2 && !/plan A/.test(lastOf(requests[0])) && /plan A: do X then Y/.test(lastOf(requests[1])), 'task note comes back with the last message');
+  assert(!/plan A/.test(requests[1].body.messages[0].content), 'system prompt stays the same across steps');
+  assert.strictEqual(requests[0].body.messages[0].content, requests[1].body.messages[0].content);
   // 3b-4) over the token budget the run is summarized and goes on (once; without changes it then stops)
   mode = 'budget'; requests.length = 0; events.length = 0;
   const long = []; for (let i = 0; i < 4; i++) long.push({ role: 'user', content: 'u' + i }, { role: 'assistant', content: 'a' + i });
@@ -318,7 +322,7 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   console.log('agent: all tests passed');
 })().catch((e) => { console.error('FAILED:', e); process.exit(1); });
 
-// ---- token tasarrufu: compactHistory
+// ---- token savings: compactHistory
 {
   const { compactHistory } = require('../electron/agent.js');
   const big = 'x'.repeat(60000);
@@ -370,3 +374,171 @@ const delta = (d, finish = null) => ({ choices: [{ delta: d, finish_reason: fini
   assert.strictEqual(a.pseudoCallCutOff(full), false);
   console.log('agent: DSML text calls ok');
 }
+
+// text-written tool calls are not shown while the answer streams
+{
+  const { runAgent } = require('../electron/agent');
+  const http = require('http');
+  const chunks = ['Saving it now. <｜DSML｜inv', 'oke name="write_file"><｜DSML｜parameter name="path" string="true">a.txt</｜DSML｜parameter></｜DSML｜invoke>'];
+  const srv = http.createServer((q, r) => { r.setHeader('content-type', 'text/event-stream'); for (const c of chunks) r.write('data: ' + JSON.stringify({ choices: [{ delta: { content: c } }] }) + '\n\n'); r.end('data: [DONE]\n\n'); });
+  srv.listen(0, '127.0.0.1', async () => {
+    const shown = [];
+    try {
+      await runAgent({ baseUrl: `http://127.0.0.1:${srv.address().port}`, key: 'k', model: 'm', messages: [{ role: 'user', content: 'hi' }], toolsEnabled: false, send: (e) => { if (e.type === 'chunk') shown.push(e.text); }, signal: undefined });
+    } catch {}
+    srv.close();
+    assert(/Saving it now/.test(shown.join('')) && !/DSML|invoke/.test(shown.join('')), shown.join('|'));
+    console.log('agent: streamed text calls hidden ok');
+  });
+}
+
+{
+  const { apiErrorText } = require('../electron/agent');
+  const a = apiErrorText({ error: { message: 'Provider returned error', code: 400, metadata: { raw: '{"error":{"message":"max_tokens is too large: 70000"}}', provider_name: 'Chutes' } } });
+  if (a !== 'Provider returned error (Chutes): max_tokens is too large: 70000') throw new Error('apiErrorText nested: ' + a);
+  if (apiErrorText({ error: { message: 'Rate limit', metadata: { raw: 'slow down', provider_name: 'X' } } }) !== 'Rate limit (X): slow down') throw new Error('apiErrorText raw string');
+  if (apiErrorText({ error: 'plain' }) !== 'plain' || apiErrorText({ error: { message: 'm' } }) !== 'm' || apiErrorText({}) !== '') throw new Error('apiErrorText basics');
+  console.log('agent: apiErrorText ok');
+}
+
+// pruneImages, token estimate, compactHistory groups, tag stripper in code, parallel-safe reads
+{
+  const a = require('../electron/agent');
+  const img = (u) => ({ type: 'image_url', image_url: { url: u } });
+  const shot = (u) => ({ role: 'user', _shot: true, content: [{ type: 'text', text: '[screenshot from the computer tool]' }, img(u)] });
+  const h = [{ role: 'user', content: [{ type: 'text', text: 'what is in this photo?' }, img('data:user')] }, shot('s1'), shot('s2'), shot('s3')];
+  a.pruneImages(h, 2);
+  assert.deepStrictEqual(h[0].content[1], img('data:user'), 'a user-attached image is not a screenshot');
+  assert.strictEqual(h[0].content[0].text, 'what is in this photo?');
+  assert.ok(h[1]._shot && h[1].content.every((p) => p.type === 'text') && /earlier screenshot omitted/.test(JSON.stringify(h[1].content)));
+  assert.deepStrictEqual(h[3].content[1], img('s3'));
+  const u2 = [{ role: 'user', content: [{ type: 'text', text: 'keep this text' }, img('old')] }, { role: 'user', content: [{ type: 'text', text: 'new' }, img('new')] }];
+  a.pruneImages(u2, 2, 1);
+  assert.strictEqual(u2[0].content[0].text, 'keep this text'); assert.ok(!u2[0].content.some((p) => p.type === 'image_url')); assert.deepStrictEqual(u2[1].content[1], img('new'));
+  // base64 images count as a fixed amount, not as text
+  const big = 'data:image/png;base64,' + 'A'.repeat(400000);
+  assert.strictEqual(a.estMsgTokens([{ role: 'user', content: [{ type: 'text', text: 'abcd' }, img(big)] }]), 1 + 1500);
+  // last-resort compaction: whole groups go, the first user message (the goal) stays, no orphan tool message
+  const H = [{ role: 'user', content: 'GOAL: build it' }];
+  for (let i = 0; i < 10; i++) H.push({ role: 'assistant', content: null, tool_calls: [{ id: 'q' + i, type: 'function', function: { name: 'x', arguments: 'y'.repeat(5000) } }] }, { role: 'tool', tool_call_id: 'q' + i, content: 'ok' });
+  H.push({ role: 'user', content: 'go on' });
+  a.compactHistory(H, 5000);
+  assert.strictEqual(H[0].content, 'GOAL: build it');
+  assert.ok(H[1].role !== 'tool', 'no leading tool result after the goal');
+  for (let i = 1; i < H.length; i++) if (H[i].role === 'tool') assert.ok(H[i - 1].role === 'tool' || H[i - 1].tool_calls, 'tool result keeps its call');
+  // [[remember:]] inside code is shown, not acted on
+  const tags = []; const st = a.makeTagStripper((k, v) => tags.push(v));
+  let out = st.push('Example:\n``'); out += st.push('`\n[[remember: from code]]\n```\nand `[[forget: x]]` ok'); out += st.flush();
+  assert.strictEqual(tags.length, 0); assert.ok(/\[\[remember: from code\]\]/.test(out) && /\[\[forget: x\]\]/.test(out), out);
+  const st2 = a.makeTagStripper((k, v) => tags.push(v)); st2.push('Sure. [[remember: real]]'); st2.flush();
+  assert.deepStrictEqual(tags, ['real']);
+  // reads in the project run in parallel; outside paths, unapproved notes and writes do not
+  const c = { root: '/p', session: new Set() };
+  assert.ok(a.canRunParallel('read_file', { path: 'src/a.js' }, c) && a.canRunParallel('web_search', {}, c));
+  assert.ok(!a.canRunParallel('read_file', { path: '~/x' }, c) && !a.canRunParallel('read_file', { path: '../x' }, c) && !a.canRunParallel('write_file', { path: 'a' }, c) && !a.canRunParallel('notes_read', {}, c));
+  c.session.add('notes'); assert.ok(a.canRunParallel('notes_read', {}, c));
+  assert.strictEqual(a.stripThinkText('<think>plan</think>\n\nAnswer'), 'Answer');
+  console.log('agent: images, estimate, compaction groups, tag stripper, parallel reads ok');
+}
+
+// stream edge cases: tool-call deltas without index, last event without newline, plain JSON reply, stall, pseudo-call retries
+(async () => {
+  const { streamOnce, runAgent } = require('../electron/agent');
+  let pseudoN = 0;
+  const srv = http.createServer((q, r) => {
+    let body = ''; q.on('data', (d) => (body += d));
+    q.on('end', () => {
+      const ev = (o) => 'data: ' + JSON.stringify(o) + '\n\n';
+      if (q.url.startsWith('/idx')) {
+        r.writeHead(200, { 'content-type': 'text/event-stream' });
+        r.write(ev({ choices: [{ delta: { tool_calls: [{ id: 'a', function: { name: 'read_file', arguments: '{"path":' } }] } }] }));
+        r.write(ev({ choices: [{ delta: { tool_calls: [{ function: { name: 'read_file', arguments: '"x"}' } }] } }] }));
+        r.write(ev({ choices: [{ delta: { tool_calls: [{ id: 'b', function: { name: 'list_dir', arguments: '{}' } }] } }] }));
+        return r.end(ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }));
+      }
+      if (q.url.startsWith('/buf')) { r.writeHead(200, { 'content-type': 'text/event-stream' }); r.write(ev({ choices: [{ delta: { content: 'Hello ' } }] })); return r.end('data: ' + JSON.stringify({ choices: [{ delta: { content: 'world' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2, cache_creation_input_tokens: 1 } })); }
+      if (q.url.startsWith('/json')) { r.writeHead(200, { 'content-type': 'application/json' }); return r.end(JSON.stringify({ choices: [{ message: { content: 'plain reply', tool_calls: [{ id: 't1', type: 'function', function: { name: 'list_dir', arguments: '{}' } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 7, completion_tokens: 1 } })); }
+      if (q.url.startsWith('/stall')) { r.writeHead(200, { 'content-type': 'text/event-stream' }); r.write(ev({ choices: [{ delta: { content: 'x' } }] })); return; }
+      // /pseudo: the model writes tool calls as text 4 times (all parse fine), then answers
+      pseudoN++;
+      r.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (pseudoN <= 4) return r.end(ev({ choices: [{ delta: { content: `<invoke name="list_dir"><parameter name="path">d${pseudoN}</parameter></invoke>` } }] }));
+      r.end(ev({ choices: [{ delta: { content: 'all done' }, finish_reason: 'stop' }] }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const B = `http://127.0.0.1:${srv.address().port}`;
+  const shown = [];
+  const send = (e) => { if (e.type === 'chunk') shown.push(e.text); };
+  let r = await streamOnce({ url: B + '/idx', body: {}, send });
+  assert.deepStrictEqual(r.toolCalls.map((c) => [c.id, c.name, c.arguments]), [['a', 'read_file', '{"path":"x"}'], ['b', 'list_dir', '{}']]);
+  r = await streamOnce({ url: B + '/buf', body: {}, send });
+  assert.strictEqual(r.text, 'Hello world'); assert.strictEqual(r.finish, 'stop'); assert.strictEqual(r.usage.cacheWrite, 1);
+  r = await streamOnce({ url: B + '/json', body: {}, send });
+  assert.strictEqual(r.text, 'plain reply'); assert.strictEqual(r.toolCalls[0].name, 'list_dir'); assert.strictEqual(r.usage.prompt, 7);
+  await assert.rejects(streamOnce({ url: B + '/stall', body: {}, send, stallMs: 150 }), /stopped sending data/);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-ps-'));
+  const evs = [];
+  await runAgent({ baseUrl: B + '/pseudo', key: 'k', model: 'm', root, toolsEnabled: true, messages: [{ role: 'user', content: 'list' }], approve: async () => true, send: (e) => evs.push(e) });
+  assert.strictEqual(pseudoN, 5, 'text-written calls that parse do not use up the retries');
+  assert.strictEqual(evs.filter((e) => e.type === 'tool:call').length, 4);
+  assert.ok(evs.filter((e) => e.type === 'chunk').map((e) => e.text).join('').includes('all done'));
+  fs.rmSync(root, { recursive: true, force: true });
+  srv.closeAllConnections?.(); srv.close();
+  console.log('agent: stream edge cases and pseudo-call retries ok');
+})().catch((e) => { console.error('FAILED:', e); process.exit(1); });
+
+// Reasoning: reasoning_content / reasoning / reasoning_details and <think> tags go to 'thinking' events, never into the visible text or the history.
+(async () => {
+  const { streamOnce } = require('../electron/agent');
+  const reqs = [];
+  const srv = http.createServer((req, res) => {
+    let body = ''; req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const b = body ? JSON.parse(body) : {}; reqs.push({ url: req.url, body: b });
+      if (req.url.startsWith('/rc')) return sse(res, [delta({ reasoning_content: 'Let me ' }), delta({ reasoning_content: 'plan.' }), delta({ content: 'Answer' }), delta({}, 'stop')]);
+      if (req.url.startsWith('/or')) return sse(res, [delta({ reasoning: 'Weigh it.', reasoning_details: [{ type: 'reasoning.text', text: 'Weigh it.' }] }), delta({ content: 'OK' }, 'stop')]);
+      if (req.url.startsWith('/rd')) return sse(res, [delta({ reasoning_details: [{ type: 'reasoning.summary', summary: 'Short.' }] }), delta({ content: 'Fine' }, 'stop')]);
+      if (req.url.startsWith('/tags')) return sse(res, [delta({ content: '<thi' }), delta({ content: 'nk>step one' }), delta({ content: ' and two</th' }), delta({ content: 'ink>\n\nHello' }), delta({ content: ' world' }, 'stop')]);
+      if (req.url.startsWith('/fence')) return sse(res, [delta({ content: '```html\n<think>example</think>\n```' }, 'stop')]);
+      if (req.url.startsWith('/unclosed')) return sse(res, [delta({ content: '<think>never closed' }, 'stop')]);
+      if (req.url.startsWith('/run')) { // step 1 thinks and calls a tool, step 2 thinks in tags and answers
+        const last = b.messages[b.messages.length - 1];
+        if (last.role !== 'tool') return sse(res, [delta({ reasoning_content: 'SECRET-THOUGHT-A' }), delta({ tool_calls: [{ index: 0, id: 't1', function: { name: 'list_dir', arguments: '{}' } }] }), delta({}, 'tool_calls')]);
+        return sse(res, [delta({ content: '<think>SECRET-THOUGHT-B</think>Done.' }, 'stop')]);
+      }
+      res.writeHead(404); res.end();
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const B = `http://127.0.0.1:${srv.address().port}`;
+  const collect = async (p) => { const evs = []; const r = await streamOnce({ url: B + p, body: {}, send: (e) => evs.push(e) }); return { r, evs, think: evs.filter((e) => e.type === 'thinking').map((e) => e.text).join(''), shown: evs.filter((e) => e.type === 'chunk').map((e) => e.text).join('') }; };
+
+  let x = await collect('/rc');
+  assert.strictEqual(x.think, 'Let me plan.'); assert.strictEqual(x.shown, 'Answer'); assert.strictEqual(x.r.text, 'Answer'); assert.strictEqual(x.r.thinking, 'Let me plan.');
+  const ends = x.evs.filter((e) => e.type === 'thinking:end');
+  assert.strictEqual(ends.length, 1); assert.ok(typeof ends[0].ms === 'number' && ends[0].ms >= 0);
+  assert.ok(x.evs.indexOf(ends[0]) < x.evs.findIndex((e) => e.type === 'chunk'), 'thinking ends before the answer starts');
+  x = await collect('/or'); assert.strictEqual(x.think, 'Weigh it.', 'reasoning and reasoning_details carry the same text: taken once'); assert.strictEqual(x.shown, 'OK');
+  x = await collect('/rd'); assert.strictEqual(x.think, 'Short.'); assert.strictEqual(x.shown, 'Fine');
+  x = await collect('/tags');
+  assert.strictEqual(x.think, 'step one and two'); assert.ok(!/think|step one/.test(x.shown), x.shown); assert.strictEqual(x.shown.trim(), 'Hello world'); assert.strictEqual(x.r.text.trim(), 'Hello world');
+  x = await collect('/fence'); assert.strictEqual(x.think, ''); assert.ok(x.shown.includes('<think>example</think>'), 'a tag inside a code block is shown as text');
+  x = await collect('/unclosed'); assert.strictEqual(x.think, 'never closed'); assert.strictEqual(x.shown, ''); assert.strictEqual(x.r.text, '');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-think-'));
+  const evs = [];
+  await runAgent({ baseUrl: B + '/run', key: 'k', model: 'm', root, toolsEnabled: true, messages: [{ role: 'user', content: 'list' }], approve: async () => true, send: (e) => evs.push(e) });
+  const types = evs.map((e) => e.type).filter((t) => /^(thinking|thinking:end|tool:call|step:new|chunk)$/.test(t));
+  const iCall = types.indexOf('tool:call'), iStep = types.indexOf('step:new');
+  assert.ok(types.indexOf('thinking') < iCall && iCall < iStep, types.join(','));
+  assert.ok(types.lastIndexOf('thinking') > iStep, 'the second step has its own thinking');
+  assert.strictEqual(evs.filter((e) => e.type === 'thinking:end').length, 2, 'one thinking block per step');
+  assert.strictEqual(evs.filter((e) => e.type === 'chunk').map((e) => e.text).join(''), 'Done.');
+  const runReqs = reqs.filter((q) => q.url.startsWith('/run'));
+  assert.strictEqual(runReqs.length, 2);
+  assert.ok(!/SECRET-THOUGHT/.test(JSON.stringify(runReqs[1].body.messages)), 'reasoning is never sent back to the model');
+  fs.rmSync(root, { recursive: true, force: true });
+  srv.closeAllConnections?.(); srv.close();
+  console.log('agent: thinking events ok');
+})().catch((e) => { console.error('FAILED:', e); process.exit(1); });

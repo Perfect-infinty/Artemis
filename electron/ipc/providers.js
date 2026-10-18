@@ -23,7 +23,12 @@ module.exports = function registerProvidersIpc(deps) {
     return { providers: publicProviders(), prices: providersLib.priceMap(readProviders()) };
   });
   ipcMain.handle('providers:test', (_e, p, apiKey) => {
-    const key = (typeof apiKey === 'string' && apiKey.trim()) || (p && p.id ? getProviderKey(p.id) : '') || '';
-    return providersLib.probe({ baseUrl: p && p.baseUrl, key, models: p && p.models, headers: p && p.headers });
+    const typed = typeof apiKey === 'string' && apiKey.trim();
+    if (typed) return providersLib.probe({ baseUrl: p && p.baseUrl, key: typed, models: p && p.models, headers: p && p.headers });
+    // the stored key only ever goes to the saved provider's own URL and headers, never to ones sent by the renderer
+    const saved = p && p.id ? readProviders().find((x) => x.id === p.id) : null;
+    const stored = saved ? getProviderKey(saved.id) || '' : '';
+    if (stored) return providersLib.probe({ baseUrl: saved.baseUrl, key: stored, models: p.models || saved.models, headers: saved.headers });
+    return providersLib.probe({ baseUrl: p && p.baseUrl, key: '', models: p && p.models, headers: p && p.headers });
   });
 };

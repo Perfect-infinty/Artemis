@@ -1,9 +1,13 @@
 // Turns chat messages (app format) into the OpenAI message format.
 import { stripThink } from './think.mjs';
+import { stripTags } from './tts-emotion.mjs';
+import { mentionHint } from './mentions.mjs';
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
-export function assistantText(m) {
-  return (m.steps || []).map((s) => stripThink(s.text)).filter(Boolean).join('\n\n');
+/** The answer's text (no thinking). Emotion tags ("[warm]") are removed unless keepTags (reading it aloud). */
+export function assistantText(m, keepTags = false) {
+  const t = (m.steps || []).map((s) => stripThink(s.text)).filter(Boolean).join('\n\n');
+  return keepTags ? t : stripTags(t);
 }
 
 export function toApiMessages(messages) {
@@ -15,10 +19,13 @@ export function toApiMessages(messages) {
       for (const a of m.attachments || []) {
         if (a.kind === 'image' && a.dataUrl) images.push(a);
         else if (a.text != null) {
-          text += `<attachment name="${a.name}">\n${a.text}${a.truncated ? '\n…[truncated]' : ''}\n</attachment>\n\n`;
+          text += `<attachment name="${a.name}"${a.lib ? ` library="${a.lib}"` : ''}>\n${a.text}${a.truncated ? '\n…[truncated]' : ''}\n</attachment>\n\n`;
         }
       }
       text += m.content || '';
+      // items picked in the "@" menu: a hint for the model only, the chat shows the text as typed
+      const hint = mentionHint(m.mentions);
+      if (hint) text += (text ? '\n\n' : '') + hint;
       if (images.length) {
         out.push({
           role: 'user',

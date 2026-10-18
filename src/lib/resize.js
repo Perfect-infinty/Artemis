@@ -14,4 +14,4 @@ export function startDrag(e, onMove, onEnd) {
 }
 export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export function loadWidth(key, def) { try { const n = Number(localStorage.getItem(key)); return n > 0 ? n : def; } catch { return def; } }
-export function saveWidth(key, w) { try { localStorage.setItem(key, String(Math.round(w))); } catch { /* yoksay */ } }
+export function saveWidth(key, w) { try { localStorage.setItem(key, String(Math.round(w))); } catch { /* ignore */ } }

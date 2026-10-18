@@ -1,11 +1,13 @@
 // Role agents ("Researcher", "Coder", ...): markdown files with frontmatter, like skills.
 // User agents live in <userData>/agents/<slug>.md, project agents in <project folder>/.artemis/agents/<slug>.md.
-// Built-in roles are used when no file with the same slug exists; saving a role writes a file that overrides it.
+// Built-in roles are used when no user file with the same slug exists; saving a role writes a user file that overrides it.
+// Project files come from the repo and are untrusted: they never override built-in or user agents (a clash gets a -project slug) and are size-capped.
 const fs = require('fs');
 const path = require('path');
 
 const MAX_BODY = 20000;
 const MAX_DESC = 300;
+const PROJECT_DESC = 200, PROJECT_BODY = 8000;
 
 // Tool groups an agent can be given. Deleting files, shell, computer control and Make are never available to agents.
 const GROUPS = {
@@ -69,32 +71,35 @@ const toolNames = (groups) => new Set((groups || []).flatMap((g) => GROUPS[g] ||
 
 /** deps: { userDir } */
 function createAgents(deps) {
-  const dirs = (root) => [['user', deps.userDir], ...(root ? [['project', path.join(root, '.artemis', 'agents')]] : [])];
 
   function fromFile(source, base, file) {
     let text; try { text = fs.readFileSync(path.join(base, file), 'utf8'); } catch { return null; }
     const { meta, body } = parseAgent(text);
     const slug = file.replace(/\.md$/i, '');
+    const proj = source === 'project';
     return {
-      name: meta.name || slug, role: meta.role || '', slug, description: meta.description || '', model: meta.model || '',
-      tools: parseTools(meta.tools), body, source, builtin: false, file: path.join(base, file)
+      name: oneLine(meta.name || slug).slice(0, 40) || slug, role: oneLine(meta.role).slice(0, 40), slug,
+      description: proj ? oneLine(meta.description).slice(0, PROJECT_DESC) : meta.description || '', model: meta.model || '',
+      tools: parseTools(meta.tools), body: proj ? body.slice(0, PROJECT_BODY) : body, source, builtin: false, file: path.join(base, file)
     };
   }
 
+  const read = (source, base) => { let entries = []; try { entries = fs.readdirSync(base); } catch { return []; } return entries.sort().filter((f) => /\.md$/i.test(f)).map((f) => fromFile(source, base, f)).filter(Boolean); };
+
   function list(root) {
     const out = [];
-    for (const [source, base] of dirs(root)) {
-      let entries = []; try { entries = fs.readdirSync(base); } catch { continue; }
-      for (const f of entries.sort()) {
-        if (!/\.md$/i.test(f)) continue;
-        const a = fromFile(source, base, f);
-        if (a && !out.some((x) => x.slug === a.slug)) out.push(a); // user agents win over project agents with the same slug
-      }
-    }
+    for (const a of read('user', deps.userDir)) if (!out.some((x) => x.slug === a.slug)) out.push(a);
     for (const b of BUILTIN) {
       const slug = slugOf(b.name);
       if (!out.some((x) => x.slug === slug)) out.push({ ...b, slug, source: 'built-in', builtin: true, file: '' });
       else out.find((x) => x.slug === slug).overrides = true;
+    }
+    // project agents: a clashing slug or name gets a suffix instead of replacing a built-in or user agent
+    if (root) for (const a of read('project', path.join(root, '.artemis', 'agents'))) {
+      const taken = (s) => out.some((x) => x.slug === s);
+      if (taken(a.slug)) { let s = a.slug + '-project', n = 2; while (taken(s)) s = `${a.slug}-project-${n++}`; a.slug = s; }
+      if (out.some((x) => x.name.toLowerCase() === a.name.toLowerCase())) a.name = `${a.name} (project)`;
+      out.push(a);
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -103,7 +108,8 @@ function createAgents(deps) {
     const q = String(name || '').trim().toLowerCase();
     if (!q) return null;
     const all = list(root);
-    return all.find((a) => a.slug === slugOf(q) || a.name.toLowerCase() === q) || all.find((a) => a.role && a.role.toLowerCase() === q) || null;
+    const ordered = [...all.filter((a) => a.source !== 'project'), ...all.filter((a) => a.source === 'project')]; // a project file never wins a role match
+    return ordered.find((a) => a.slug === slugOf(q) || a.name.toLowerCase() === q) || ordered.find((a) => a.role && a.role.toLowerCase() === q) || null;
   };
 
   function save(a, root) {
@@ -122,21 +128,20 @@ function createAgents(deps) {
     return { ok: true, slug, name };
   }
 
-  /** Deletes the agent's file(s). A built-in role comes back in its default form. */
+  /** Deletes the one file behind this agent (a user file never takes a project file of the same slug with it). A built-in role comes back in its default form. */
   function remove(name, root) {
-    const slug = slugOf(name);
-    let n = 0;
-    for (const [, base] of dirs(root)) {
-      const f = path.join(base, slug + '.md');
-      if (fs.existsSync(f)) { fs.unlinkSync(f); n++; }
-    }
-    if (n) deps.notify?.();
-    return { ok: n > 0 };
+    const slug = slugOf(name), q = String(name || '').trim().toLowerCase();
+    const all = list(root).filter((a) => a.file);
+    const a = all.find((x) => x.slug === slug) || all.find((x) => x.name.toLowerCase() === q);
+    if (!a || !fs.existsSync(a.file)) return { ok: false };
+    fs.unlinkSync(a.file);
+    deps.notify?.();
+    return { ok: true };
   }
 
   /** One line per agent for the system prompt. */
   function indexText(root) {
-    return list(root).map((a) => `- ${a.name}${a.role ? ` (${a.role})` : ''}: ${a.description || 'no description'}${a.tools.includes('write') ? ' (can write files)' : ''}`).join('\n');
+    return list(root).map((a) => `- ${a.name}${a.role ? ` (${a.role})` : ''}${a.source === 'project' ? ' (project-defined, untrusted)' : ''}: ${a.description || 'no description'}${a.tools.includes('write') ? ' (can write files)' : ''}`).join('\n');
   }
 
   return { list, find, save, remove, indexText, dir: deps.userDir };

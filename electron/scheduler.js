@@ -48,13 +48,14 @@ function describe(job) {
   }
 }
 
-function validate(job) {
+function validate(job, now = Date.now()) {
   if (!String(job.name || '').trim()) throw new Error('Give the task a name.');
   if (!String(job.prompt || '').trim()) throw new Error('Write what the task should do.');
   const r = job.repeat || {};
   if (!['once', 'interval', 'daily', 'weekdays', 'weekly', 'monthly'].includes(r.type)) throw new Error('Choose how often it runs.');
   if (r.type === 'interval' && !(Number(r.every) >= 5)) throw new Error('The interval must be at least 5 minutes.');
   if (r.type === 'once' && !/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) throw new Error('Pick a date.');
+  if (r.type === 'once' && job.enabled !== false && nextRunAfter(job, now) === null) throw new Error('That date and time have already passed. Pick a time in the future.');
   if (r.type === 'weekly' && !(r.days || []).length) throw new Error('Pick at least one weekday.');
 }
 
@@ -89,7 +90,11 @@ function createScheduler(deps) {
     let list = load();
     let dirty = false;
     list = list.map((j) => {
-      if (j.enabled && !j.nextRun && j.lastStatus !== 'running') { dirty = true; return { ...j, nextRun: nextRunAfter(j, t) }; }
+      if (j.enabled && !j.nextRun && j.lastStatus !== 'running') {
+        dirty = true;
+        const next = nextRunAfter(j, t);
+        return next ? { ...j, nextRun: next } : { ...j, nextRun: null, enabled: false }; // a job that will never run again (past one-time) switches off
+      }
       return j;
     });
     if (dirty) store(list);
@@ -102,7 +107,7 @@ function createScheduler(deps) {
     stop: () => { if (timer) clearInterval(timer); timer = null; },
     list: () => load().map((j) => ({ ...j, description: describe(j), running: running.has(j.id) })),
     save(input) {
-      validate(input);
+      validate(input, now());
       const list = load();
       const id = input.id || 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const old = list.find((j) => j.id === id);
@@ -116,7 +121,11 @@ function createScheduler(deps) {
       return job;
     },
     toggle(id, enabled) {
-      store(load().map((j) => (j.id === id ? { ...j, enabled, nextRun: enabled ? nextRunAfter(j, now()) : null } : j)));
+      store(load().map((j) => {
+        if (j.id !== id) return j;
+        const next = enabled ? nextRunAfter(j, now()) : null;
+        return { ...j, enabled: !!(enabled && next), nextRun: next };
+      }));
     },
     remove: (id) => store(load().filter((j) => j.id !== id)),
     runNow(id) { const j = load().find((x) => x.id === id); return j ? start(j, true) : Promise.resolve({ ok: false, error: 'Task not found.' }); },

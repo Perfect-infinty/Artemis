@@ -1,6 +1,11 @@
 // Usage limits: sums recorded tokens for today / this month and compares them with the user's limits (0 = off).
-/** USD for one usage record, from the prices set per model in Settings → Providers ($ per 1M tokens). Unknown models count as 0. Cached-token discounts are ignored, so this is an upper bound. */
-const costOf = (r, extra) => { const p = extra && extra[r.model]; if (!p) return 0; const c = Math.min(r.cached || 0, r.prompt || 0); return (((r.prompt || 0) - c) * p[0] + c * p[0] * 0.1 + (r.completion || 0) * p[1]) / 1e6; };
+/** USD for one usage record, from the prices set per model in Settings → Providers ($ per 1M tokens). Unknown models count as 0.
+ *  Cache reads (`cached`) are billed at 10% of the input price, cache writes (`cacheWrite`) at 125%; both are part of `prompt`. */
+const costOf = (r, extra) => {
+  const p = extra && extra[r.model]; if (!p) return 0;
+  const prompt = r.prompt || 0, c = Math.min(r.cached || 0, prompt), w = Math.min(r.cacheWrite || 0, prompt - c);
+  return ((prompt - c - w) * p[0] + c * p[0] * 0.1 + w * p[0] * 1.25 + (r.completion || 0) * p[1]) / 1e6;
+};
 const startOfDay = (now) => { const d = new Date(now); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const startOfMonth = (now) => { const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(1); return d.getTime(); };
 const usd = (n) => '$' + (n >= 10 ? n.toFixed(1) : n.toFixed(2));

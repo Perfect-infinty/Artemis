@@ -44,7 +44,7 @@ function createSkills(deps) {
       let entries = [];
       try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { continue; }
       for (const e of entries) {
-        if (!e.isDirectory()) continue;
+        if (!e.isDirectory() || e.name.startsWith('.')) continue; // dot folders are unfinished imports
         const file = path.join(base, e.name, 'SKILL.md');
         let text;
         try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
@@ -140,13 +140,20 @@ function createSkills(deps) {
       if (!/\.md$/i.test(src)) return { ok: false, error: 'Choose a SKILL.md file or a skill folder.' };
       const { meta, body } = parseSkill(fs.readFileSync(src, 'utf8'));
       const name = meta.name || path.basename(path.dirname(src));
-      return save({ name, description: meta.description, body, by: 'user' });
+      return save({ name, description: meta.description, body, by: 'user', mode: 'create' });
     }
     if (!fs.existsSync(path.join(src, 'SKILL.md'))) return { ok: false, error: 'That folder has no SKILL.md.' };
     const { meta } = parseSkill(fs.readFileSync(path.join(src, 'SKILL.md'), 'utf8'));
     const slug = slugOf(meta.name || path.basename(src));
     if (!slug) return { ok: false, error: 'The skill has no name.' };
-    const dest = path.join(deps.userDir, slug);
+    const existing = find(meta.name || slug, null);
+    if (existing) return { ok: false, error: `A skill named "${existing.name}" already exists. Remove or rename it first.` };
+    // never write into an existing folder: pick slug, slug-2, slug-3...
+    let destSlug = slug;
+    for (let n = 2; fs.existsSync(path.join(deps.userDir, destSlug)); n++) destSlug = `${slug}-${n}`;
+    const dest = path.join(deps.userDir, destSlug);
+    fs.mkdirSync(deps.userDir, { recursive: true });
+    const tmp = path.join(deps.userDir, `.import-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
     let total = 0;
     const copy = (from, to) => {
       fs.mkdirSync(to, { recursive: true });
@@ -157,9 +164,10 @@ function createSkills(deps) {
         else { total += fs.statSync(a).size; if (total > MAX_IMPORT_BYTES) throw new Error('The skill folder is larger than 5 MB.'); fs.copyFileSync(a, b); }
       }
     };
-    try { copy(src, dest); } catch (e) { fs.rmSync(dest, { recursive: true, force: true }); return { ok: false, error: e.message }; }
+    // copy into a temp folder, then move it into place; a failure only removes the temp copy
+    try { copy(src, tmp); fs.renameSync(tmp, dest); } catch (e) { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} return { ok: false, error: e.message }; }
     try { deps.notify && deps.notify(); } catch {}
-    return { ok: true, name: meta.name || slug, slug };
+    return { ok: true, name: meta.name || slug, slug: destSlug };
   }
 
   return { list: scan, get, save, remove, setEnabled, indexText, importFrom, find };

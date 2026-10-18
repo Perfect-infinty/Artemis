@@ -1,4 +1,5 @@
 // Phone access: the Telegram bot. It talks to the agent through one conversation "channel".
+const { stripThink } = require('./remote/think');
 const path = require('path');
 const crypto = require('crypto');
 const { createTelegram } = require('./remote/telegram');
@@ -49,7 +50,7 @@ function createChannel(runChat, abortFn, onTurn, autoLink, onLink) {
       };
       try { await runChat({ requestId, messages: [...history, { role: 'user', content }], send, session }); }
       finally { running = null; }
-      const final = steps.filter(Boolean).join('\n\n');
+      const final = stripThink(steps.filter(Boolean).join('\n\n'));
       history = [...history, { role: 'user', content: textOf(content) }, { role: 'assistant', content: final || '(no reply)' }].slice(-30);
       if (linked && final && onTurn) { try { onTurn(linked, textOf(content), final); } catch {} }
       return final;

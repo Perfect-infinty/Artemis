@@ -6,11 +6,36 @@ import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icons.jsx';
 
 const api = window.api;
-const THEME = {
+const FALLBACK = {
   background: '#1b1b1a', foreground: '#e8e6df', cursor: '#e8e6df', selectionBackground: 'rgba(120,160,255,.35)',
   black: '#2b2b29', red: '#e06c75', green: '#98c379', yellow: '#e5c07b', blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#dcdcd4',
   brightBlack: '#6b6a64', brightRed: '#ef8b93', brightGreen: '#b1d995', brightYellow: '#f0d08f', brightBlue: '#82c0f5', brightMagenta: '#d89be8', brightCyan: '#7ccbd5', brightWhite: '#ffffff'
 };
+
+/** Terminal palette taken from the active theme's CSS variables, so it follows theme changes. */
+function themeFromCss() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n, fb) => (cs.getPropertyValue(n) || '').trim() || fb;
+  const bg = v('--bg', FALLBACK.background);
+  const text = v('--text', FALLBACK.foreground);
+  const accent = v('--accent', FALLBACK.blue);
+  const border = v('--border', FALLBACK.black);
+  const muted = v('--muted', FALLBACK.brightBlack);
+  return {
+    ...FALLBACK,
+    background: bg,
+    foreground: text,
+    cursor: text,
+    cursorAccent: bg,
+    selectionBackground: accent + '55',
+    black: border, brightBlack: muted,
+    white: text, brightWhite: text,
+    blue: accent, brightBlue: accent,
+    red: v('--danger', FALLBACK.red), brightRed: v('--danger', FALLBACK.brightRed),
+    green: v('--ok', FALLBACK.green), brightGreen: v('--ok', FALLBACK.brightGreen),
+    yellow: v('--warn', FALLBACK.yellow), brightYellow: v('--warn', FALLBACK.brightYellow),
+  };
+}
 
 /** One xterm bound to one PTY session. If `id` is null a new session is opened and reported via onId. */
 export function TerminalView({ id, cwd, active = true, onId, onExit }) {
@@ -20,13 +45,21 @@ export function TerminalView({ id, cwd, active = true, onId, onExit }) {
   const sid = useRef(id || null);
   const [exited, setExited] = useState(null);
 
+  // Follow theme changes (data-theme / custom theme vars on <html>).
+  useEffect(() => {
+    const apply = () => { try { if (term.current) term.current.options.theme = themeFromCss(); } catch {} };
+    const obs = new MutationObserver(apply);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-vars', 'data-accent', 'style'] });
+    return () => obs.disconnect();
+  }, []);
+
   const doFit = useCallback(() => {
     const el = host.current; if (!el || !term.current || !fit.current || el.clientWidth < 20 || el.clientHeight < 20) return;
     try { fit.current.fit(); if (sid.current) api.termResize(sid.current, term.current.cols, term.current.rows); } catch {}
   }, []);
 
   useEffect(() => {
-    const t = new XTerm({ fontFamily: 'Menlo, "SF Mono", Monaco, Consolas, monospace', fontSize: 13, cursorBlink: true, scrollback: 5000, allowProposedApi: true, macOptionIsMeta: true, theme: THEME });
+    const t = new XTerm({ fontFamily: 'Menlo, "SF Mono", Monaco, Consolas, monospace', fontSize: 13, cursorBlink: true, scrollback: 5000, allowProposedApi: true, macOptionIsMeta: true, theme: themeFromCss() });
     const f = new FitAddon();
     t.loadAddon(f);
     t.loadAddon(new WebLinksAddon((_e, url) => api.openExternalUrl ? api.openExternalUrl(url) : window.open(url)));
@@ -69,7 +102,10 @@ export function TerminalView({ id, cwd, active = true, onId, onExit }) {
 
     const ro = new ResizeObserver(() => doFit());
     ro.observe(host.current);
-    return () => { dead = true; ro.disconnect(); offs.forEach((o) => o && o()); t.dispose(); term.current = null; };
+    // keep the xterm palette in sync when the user switches theme
+    const themeObs = new MutationObserver(() => { try { t.options.theme = themeFromCss(); } catch {} });
+    themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-vars', 'style', 'class'] });
+    return () => { dead = true; ro.disconnect(); themeObs.disconnect(); offs.forEach((o) => o && o()); t.dispose(); term.current = null; };
     // eslint-disable-next-line
   }, []);
 
@@ -95,15 +131,15 @@ export function TerminalDock({ tabs, activeKey, cwd, height, onHeight, onSelect,
           {tabs.map((t, i) => (
             <div key={t.key} className={'term-tab' + (t.key === activeKey ? ' on' : '')} onClick={() => onSelect(t.key)}>
               <Icon name="terminal" size={13} /> <span>{t.title || `Terminal ${i + 1}`}</span>
-              <button className="term-x" title="Close" onClick={(e) => { e.stopPropagation(); onClose(t.key); }}>×</button>
+              <button className="term-x" title="Close" aria-label="Close" onClick={(e) => { e.stopPropagation(); onClose(t.key); }}>×</button>
             </div>
           ))}
-          <button className="term-btn" title="New terminal" onClick={onNew}>+</button>
+          <button className="term-btn" title="New terminal" aria-label="New terminal" onClick={onNew}>+</button>
         </div>
         <div className="term-actions">
-          <button className="term-btn" title="Open in a window" onClick={() => onPopOut(activeKey, false)}><Icon name="external" size={14} /></button>
-          <button className="term-btn" title="Open as floating window (always on top)" onClick={() => onPopOut(activeKey, true)}><Icon name="pin" size={14} /></button>
-          {!full && <button className="term-btn" title="Hide panel (sessions keep running)" onClick={onHide}>⌄</button>}
+          <button className="term-btn" title="Open in a window" aria-label="Open in a window" onClick={() => onPopOut(activeKey, false)}><Icon name="external" size={14} /></button>
+          <button className="term-btn" title="Open as floating window (always on top)" aria-label="Open as floating window (always on top)" onClick={() => onPopOut(activeKey, true)}><Icon name="pin" size={14} /></button>
+          {!full && <button className="term-btn" title="Hide panel (sessions keep running)" aria-label="Hide panel (sessions keep running)" onClick={onHide}>⌄</button>}
         </div>
       </div>
       <div className="term-body">
@@ -128,7 +164,7 @@ export function TerminalWindow({ id }) {
       <div className={'term-win-bar' + (mac ? ' pad-mac' : '')}>
         <span className="term-win-title"><Icon name="terminal" size={14} /> Terminal</span>
         <div className="term-actions nodrag">
-          <button className={'term-btn' + (float ? ' on' : '')} title={float ? 'Floating: always on top (click to turn off)' : 'Keep on top of other windows'} onClick={toggle}><Icon name="pin" size={14} /> {float ? 'Floating' : 'Float'}</button>
+          <button className={'term-btn' + (float ? ' on' : '')} title={float ? 'Floating: always on top (click to turn off)' : 'Keep on top of other windows'} aria-label={float ? 'Floating: always on top (click to turn off)' : 'Keep on top of other windows'} onClick={toggle}><Icon name="pin" size={14} /> {float ? 'Floating' : 'Float'}</button>
           <button className="term-btn" title="Move back into the app" onClick={() => api.termDock(id)}>Dock back</button>
         </div>
       </div>

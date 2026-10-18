@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Select from './Select.jsx';
 import { Icon } from './Icons.jsx';
+import MemoryPanel from './MemoryPanel.jsx';
 
 const LEVELS = ['all', 'info', 'warn', 'error'];
 const rank = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -21,6 +22,8 @@ export default function LogsView() {
   const [open, setOpen] = useState({});
   const [now, setNow] = useState(Date.now());
   const [copied, setCopied] = useState(false);
+  const [mem, setMem] = useState(() => { const v = !!window.__showMemoryPanel; window.__showMemoryPanel = false; return v; });
+  useEffect(() => { const on = () => { window.__showMemoryPanel = false; setMem(true); }; window.addEventListener('artemis:show-memory', on); return () => window.removeEventListener('artemis:show-memory', on); }, []);
   const box = useRef(null);
 
   useEffect(() => {
@@ -58,7 +61,9 @@ export default function LogsView() {
         <button onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
         <button onClick={() => api.logsReveal()} title={file}>Open log file</button>
         <button onClick={clear}>Clear</button>
+        <button className={mem ? 'on' : ''} onClick={() => setMem((v) => !v)} title="Memory use per process (also logged every 5 minutes)">Memory</button>
       </div>
+      {mem && <MemoryPanel compact />}
 
       {(running.length > 0 || recent.length > 0) && (
         <div className="logs-tasks">

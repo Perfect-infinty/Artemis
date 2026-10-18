@@ -12,7 +12,7 @@ const DRAG = 'text/artemis-note';
  * The "Notes" block at the top of the sidebar: a collapsible tree of folders and notes that looks like the chat list.
  * onOpen(path, how) with how = 'here' | 'tab' | 'split'.
  */
-export default function NotesSection({ items, root, active, onOpen, onNew, onNewFolder, onRename, onDelete, onMove, onPickRoot, onReveal }) {
+export default function NotesSection({ items, root, active, onOpen, onNew, onNewFolder, onRename, onDelete, onMove, onPickRoot, onReveal, onGraph, graphActive }) {
   const [open, setOpen] = useState(() => lsGet('artemis-notes-open', true));
   const [closed, setClosed] = useState(() => new Set(lsGet('artemis-notes-closed', [])));
   const [folder, setFolder] = useState('');      // where "new note" goes
@@ -23,6 +23,7 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
   const [moveFor, setMoveFor] = useState(null);
   const [dropOn, setDropOn] = useState(null);
   const [dragging, setDragging] = useState(false);
+  const [renaming, setRenaming] = useState(null); // { path, value } while a name is being edited in place
 
   useEffect(() => lsSet('artemis-notes-open', open), [open]);
   useEffect(() => lsSet('artemis-notes-closed', [...closed]), [closed]);
@@ -40,7 +41,16 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
   }), [items, closed]);
   const toggleDir = (p) => setClosed((c) => { const n = new Set(c); if (n.has(p)) n.delete(p); else n.add(p); return n; });
 
+  const commitRename = () => {
+    const r = renaming; setRenaming(null);
+    if (!r) return;
+    const base = it_base(r.path);
+    const name = r.value.trim();
+    if (name && name !== base) onRename(r.path, name);
+  };
+  const it_base = (p) => p.split('/').pop().replace(/\.md$/i, '');
   const click = (e, it) => {
+    if (renaming) return;
     if (it.dir) { setFolder(it.path); toggleDir(it.path); return; }
     setFolder(parentOf(it.path));
     onOpen(it.path, e.metaKey || e.ctrlKey ? 'tab' : 'here');
@@ -48,7 +58,7 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
   const rowMenu = (e, it) => {
     e.preventDefault();
     const common = [
-      { label: 'Rename', onClick: () => onRename(it.path) },
+      { label: 'Rename', hint: 'Double-click', onClick: () => setRenaming({ path: it.path, value: it_base(it.path) }) },
       { label: 'Move to…', onClick: () => setMoveFor(it.path) },
       { label: 'Delete', danger: true, onClick: () => onDelete(it.path) }
     ];
@@ -60,7 +70,7 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
 
   const dragProps = (path) => ({
     draggable: true,
-    onDragStart: (e) => { e.dataTransfer.setData(DRAG, path); e.dataTransfer.effectAllowed = 'move'; setDragging(true); },
+    onDragStart: (e) => { e.dataTransfer.setData(DRAG, path); e.dataTransfer.setData('text/plain', path); e.dataTransfer.effectAllowed = 'move'; setTimeout(() => setDragging(true), 0); }, // changing the DOM inside dragstart makes Chromium cancel the drag
     onDragEnd: () => { setDragging(false); setDropOn(null); }
   });
   const dropProps = (folderPath) => ({
@@ -75,9 +85,10 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         <span className="notes-head-t">Notes</span>
         <span style={{ flex: 1 }} />
-        <button title="New note" onClick={(e) => { e.stopPropagation(); setOpen(true); onNew(folder); }}><Icon name="plus" size={14} /></button>
-        <button title="New folder" onClick={(e) => { e.stopPropagation(); setOpen(true); onNewFolder(folder); }}><Icon name="folder" size={14} /></button>
-        <button title="Search notes" className={searching ? 'on' : ''} onClick={(e) => { e.stopPropagation(); setOpen(true); setSearching((s) => { if (s) setQ(''); return !s; }); }}><Icon name="search" size={14} /></button>
+        <button title="New note" aria-label="New note" onClick={(e) => { e.stopPropagation(); setOpen(true); onNew(folder); }}><Icon name="plus" size={14} /></button>
+        <button title="New folder" aria-label="New folder" onClick={(e) => { e.stopPropagation(); setOpen(true); onNewFolder(folder); }}><Icon name="folder" size={14} /></button>
+        {onGraph && <button title="Graph view" aria-label="Graph view" className={graphActive ? 'on' : ''} onClick={(e) => { e.stopPropagation(); onGraph(); }}><Icon name="graph" size={14} /></button>}
+        <button title="Search notes" aria-label="Search notes" className={searching ? 'on' : ''} onClick={(e) => { e.stopPropagation(); setOpen(true); setSearching((s) => { if (s) setQ(''); return !s; }); }}><Icon name="search" size={14} /></button>
       </div>
       {open && (
         <>
@@ -92,24 +103,23 @@ export default function NotesSection({ items, root, active, onOpen, onNew, onNew
               )) : <div className="muted small note-empty">No matches.</div>
             ) : (
               <>
-                {dragging && <div className={'notes-root' + (dropOn === '' ? ' drop' : '')} {...dropProps('')}>Top level</div>}
                 {visible.map((it) => (
                   <div key={it.path} className={'chat-item note-row' + (it.dir ? ' dir' : '') + (it.dir && dropOn === it.path ? ' drop' : '') + (!it.dir && active === it.path ? ' active' : '')}
-                    style={{ paddingLeft: 10 + it.depth * 14 }} {...dragProps(it.path)} {...(it.dir ? dropProps(it.path) : {})}
-                    onClick={(e) => click(e, it)} onContextMenu={(e) => rowMenu(e, it)}>
+                    style={{ paddingLeft: 10 + it.depth * 14 }} {...(renaming && renaming.path === it.path ? {} : dragProps(it.path))} {...dropProps(it.dir ? it.path : parentOf(it.path))}
+                    onClick={(e) => click(e, it)} onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); setRenaming({ path: it.path, value: it_base(it.path) }); }} onContextMenu={(e) => rowMenu(e, it)}>
                     {it.dir && <Icon name={closed.has(it.path) ? 'chevronRight' : 'chevronDown'} size={12} className="note-chev" />}
                     <Icon name={it.dir ? 'folder' : 'file'} size={15} className="row-icon" />
-                    <span className="t">{it.name}</span>
-                    {!it.dir && <button className="x" title="Delete" onClick={(e) => { e.stopPropagation(); onDelete(it.path); }}><Icon name="x" size={14} /></button>}
+                    {renaming && renaming.path === it.path
+                      ? <input className="note-rename" autoFocus value={renaming.value} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()}
+                          onChange={(e) => setRenaming({ ...renaming, value: e.target.value })} onBlur={commitRename}
+                          onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); else if (e.key === 'Escape') { setRenaming({ ...renaming, value: it_base(renaming.path) }); e.currentTarget.blur(); } }} />
+                      : <span className="t" title="Double-click to rename">{it.name}</span>}
                   </div>
                 ))}
+                {dragging && <div className={'notes-root' + (dropOn === '' ? ' drop' : '')} {...dropProps('')}>Drop here to move to the top level</div>}
                 {!items.length && <div className="muted small note-empty">No notes yet. Click + to write the first one.</div>}
               </>
             )}
-          </div>
-          <div className="notes-links" title={root}>
-            <button onClick={onReveal}>Open folder</button>
-            <button onClick={onPickRoot}>Change folder…</button>
           </div>
         </>
       )}

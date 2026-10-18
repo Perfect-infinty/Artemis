@@ -1,7 +1,7 @@
 import React from 'react';
 import { Icon } from './Icons.jsx';
 import ProjectLogo from './ProjectLogo.jsx';
-import Composer from './Composer.jsx';
+import Composer, { ChatPills } from './Composer.jsx';
 import { dayGroup } from '../lib/history.js';
 
 const base = (p) => (p ? String(p).split(/[\\/]/).filter(Boolean).pop() : '');
@@ -40,10 +40,14 @@ export function ProjectsList({ projects, chats, onOpen, onNew, onPin }) {
   );
 }
 
-export function ProjectPage({ project, chats, statusOf, onBack, onEdit, onSelect, onStartChat }) {
+export function ProjectPage({ project, chats, statusOf, onBack, onEdit, onSelect, onStartChat, groups = [], defaultModel = '', brains = [], settings = {}, onUsageDetails, onOpenSettings, sentinel = 'off', onSentinel }) {
   const list = chats.filter((c) => c.projectId === project.id && c.messages.length).sort((a, b) => b.updatedAt - a.updatedAt);
+  const [draft, setDraft] = React.useState({}); // choices for the chat the box below starts
+  const up = (patch) => setDraft((d) => ({ ...d, ...patch }));
+  const brain = draft.brain !== undefined ? draft.brain : (settings.defaultBrain || '');
+  const model = draft.model || defaultModel;
   return (
-    <div className="page">
+    <div className="page proj-page">
       <button className="link-btn" onClick={onBack}><Icon name="chevronRight" size={14} className="flip" /> All projects</button>
       <div className="page-head">
         <h1><ProjectLogo logo={project.logo} size={22} /> {project.name}</h1>
@@ -54,7 +58,20 @@ export function ProjectPage({ project, chats, statusOf, onBack, onEdit, onSelect
       </div>
       {project.folder && <div className="muted small proj-path"><Icon name="folderOpen" size={14} /> {project.folder}</div>}
       {project.instructions && <div className="instr"><div className="instr-label">Instructions</div>{project.instructions}</div>}
-      <Composer key={project.id} streaming={false} onSend={onStartChat} onStop={() => {}} placeholder={`Start a chat in ${project.name}…`} />
+      <div className="home-pills">
+          <ChatPills stacked={false} brains={brains} brain={brain}
+            onBrain={(v) => { const b = brains.find((x) => x.slug === v); up({ brain: v, ...(b && b.model ? { model: b.model } : {}) }); }}
+            tools={draft.tools || 'on'} onTools={(v) => up({ tools: v })}
+            agents={draft.agents || 'on'} onAgents={(v) => up({ agents: v })}
+            perm={draft.perm || 'ask'} onPerm={(v) => up({ perm: v })}
+            model={model} settings={settings} onUsageDetails={onUsageDetails} onOpenSettings={onOpenSettings}
+            sentinel={sentinel} onSentinel={onSentinel} />
+        </div>
+        <Composer key={project.id} chatId={"draft:project:" + project.id} streaming={false} onSend={(t, a, x) => { onStartChat(t, a, { ...draft, brain, model, ...(x || {}) }); setDraft({}); }} onStop={() => {}} placeholder={`Start a chat in ${project.name}…`} sentinel={sentinel} onSentinel={onSentinel}
+          model={model} onModel={(m) => up({ model: m })} groups={groups}
+          settings={settings} onUsageDetails={onUsageDetails} onOpenSettings={onOpenSettings}
+          tools={draft.tools || 'on'} onTools={(v) => up({ tools: v })} agents={draft.agents || 'on'} onAgents={(v) => up({ agents: v })}
+          brains={brains} brain={brain} onBrain={(v) => up({ brain: v })} />
       <div className="section-title">Chats</div>
       {list.length === 0 ? <div className="muted small">No chats in this project yet.</div> : (
         <div className="proj-chats">

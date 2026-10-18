@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icons.jsx';
 
@@ -20,8 +20,9 @@ function parse(children) {
 }
 
 /** Custom dropdown with the same API as <select> (value, onChange(e) with e.target.value, <option>/<optgroup> children). */
-export default function Select({ value, onChange, children, className = '', title, disabled, style, id, placeholder = 'Choose…' }) {
+export default function Select({ value, onChange, children, className = '', title, disabled, style, id, placeholder = 'Choose…', 'aria-label': ariaLabel, 'aria-labelledby': ariaLabelledby }) {
   const opts = useMemo(() => parse(children), [children]);
+  const valueId = useId();
   const [open, setOpen] = useState(false);
   const [act, setAct] = useState(0);
   const [pos, setPos] = useState(null);
@@ -78,8 +79,8 @@ export default function Select({ value, onChange, children, className = '', titl
   let last = null;
   return (
     <>
-      <button type="button" id={id} ref={btn} className={`sel ${pill ? '' : 'field-sel'} ${className} ${open ? 'open' : ''}`} style={style} title={title} disabled={disabled} onClick={toggle} onKeyDown={onKey} aria-haspopup="listbox" aria-expanded={open}>
-        <span className="sel-label">{cur ? cur.label : (v || placeholder)}</span>
+      <button type="button" id={id} ref={btn} className={`sel ${pill ? '' : 'field-sel'} ${className} ${open ? 'open' : ''}`} style={style} title={title} disabled={disabled} onClick={toggle} onKeyDown={onKey} aria-haspopup="listbox" aria-expanded={open} aria-label={ariaLabel} aria-labelledby={ariaLabelledby ? ariaLabelledby + ' ' + valueId : undefined}>
+        <span className="sel-label" id={valueId}>{cur ? cur.label : (v || placeholder)}</span>
         <Icon name="chevronDown" size={13} />
       </button>
       {open && pos && createPortal(
@@ -108,3 +109,4 @@ export default function Select({ value, onChange, children, className = '', titl
     </>
   );
 }
+Select.acceptsLabel = true; // a settings Row may give it the row label as its accessible name

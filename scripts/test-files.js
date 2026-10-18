@@ -34,5 +34,25 @@ const files = require('../electron/files');
   a = await files.parseBuffer('note.txt', Buffer.from('hello wörld'), dir); assert.strictEqual(a.kind, 'text'); assert.strictEqual(a.text, 'hello wörld');
   a = await files.parseBuffer('empty.bin', Buffer.alloc(0), dir); assert.strictEqual(a.kind, 'error');
   a = await files.parseBuffer('data.xlsx', fs.readFileSync(path.join(dir, 'bad.zip')), dir); assert.strictEqual(a.kind, 'error'); // a broken file is reported, not thrown
+  // UTF-16 (with or without BOM) is text; invalid UTF-8 is read as windows-1254
+  fs.writeFileSync(path.join(dir, 'u16.txt'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('café crème', 'utf16le')]));
+  a = await files.parseAttachment(path.join(dir, 'u16.txt')); assert.strictEqual(a.kind, 'text'); assert.strictEqual(a.text, 'café crème');
+  fs.writeFileSync(path.join(dir, 'u16be.log'), Buffer.from('hello there', 'utf16le').swap16());
+  a = await files.parseAttachment(path.join(dir, 'u16be.log')); assert.strictEqual(a.text, 'hello there');
+  fs.writeFileSync(path.join(dir, 'legacy.txt'), Buffer.from([0x6e, 0x61, 0xef, 0x76, 0x65]));
+  let rc = await files.readContent(path.join(dir, 'legacy.txt')); assert(rc.text === 'naïve' && rc.encoding === 'windows-1254');
+  rc = await files.readContent(path.join(dir, 'u16.txt')); assert(rc.encoding === 'utf16le' && rc.bom);
+  assert.deepStrictEqual(files.encodeText('Éü', { encoding: 'windows-1254' }).buf, Buffer.from([0xc9, 0xfc]));
+  assert(files.encodeText('✓', { encoding: 'windows-1254' }).switched);
+  // a big text file is not read whole: only its start comes back, marked large
+  const big = path.join(dir, 'big.txt'); fs.writeFileSync(big, 'x'.repeat(21 * 1024 * 1024));
+  rc = await files.readContent(big); assert(rc.large && rc.text.length <= 256 * 1024 && rc.size > 20 * 1024 * 1024);
+  a = await files.parseAttachment(big); assert(a.truncated && a.kind === 'text');
+  const s = await files.streamText(big, { offset: 21 * 1024 * 1024 - 10, maxChars: 100 }); assert(s.text.length === 10 && !s.cut);
+  // a big unknown binary is sniffed, not read
+  const bin = path.join(dir, 'disk.img'); fs.writeFileSync(bin, Buffer.alloc(30 * 1024 * 1024));
+  a = await files.parseAttachment(bin); assert.strictEqual(a.kind, 'binary');
+  assert(!files.TEXT_EXT.has('.zip') && files.kindOf('a.zip') === 'archive');
+  fs.rmSync(dir, { recursive: true, force: true });
   console.log('files: all tests passed'); process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });

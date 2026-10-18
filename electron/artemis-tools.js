@@ -19,31 +19,40 @@ const SAFE_SETTINGS = {
   personalityCustom: (v) => String(v).slice(0, 2000),
   model: (v) => { v = String(v).trim(); if (!v) throw new Error('model is empty'); return v.slice(0, 200); }, // the Default model for new chats
   reflectModel: (v) => String(v).slice(0, 200),
+  titleModel: (v) => String(v).slice(0, 200), scheduleModel: (v) => String(v).slice(0, 200), autoTitles: Boolean,
   toolsEnabled: Boolean, memoryEnabled: Boolean, webEnabled: Boolean, notesAi: Boolean, autoLearn: Boolean, skillsEnabled: Boolean,
   connectorsEnabled: Boolean, chatSearchEnabled: Boolean, delegateEnabled: Boolean, closeToTray: Boolean,
   voiceAutoRead: Boolean, voiceLanguage: (v) => String(v).slice(0, 12),
-  ttsEngine: (v) => { if (!['system', 'openai', 'piper'].includes(v)) throw new Error('ttsEngine must be system, openai or piper'); return v; },
+  ttsEngine: (v) => { if (!['system', 'openai', 'piper', 'chatterbox'].includes(v)) throw new Error('ttsEngine must be system, openai (Kokoro), chatterbox or piper'); return v; },
   ttsUrl: (v) => { v = String(v).trim().replace(/\/+$/, ''); if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(v)) throw new Error('ttsUrl must be a local address such as http://localhost:8880'); return v; },
   ttsModel: (v) => String(v).slice(0, 100), ttsVoice: (v) => String(v).slice(0, 100), ttsVoiceEn: (v) => String(v).slice(0, 100),
+  cbUrl: (v) => { v = String(v).trim().replace(/\/+$/, ''); if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(v)) throw new Error('cbUrl must be a local address such as http://localhost:8004'); return v; },
+  cbVoice: (v) => String(v).slice(0, 200), cbHybrid: Boolean,
+  cbExaggeration: (v) => Math.min(2, Math.max(0.25, Number(v) || 0.5)), cbCfg: (v) => Math.min(1, Math.max(0, Number(v) || 0)),
+  cbTemperature: (v) => Math.min(2, Math.max(0.05, Number(v) || 0.8)), cbSpeed: (v) => Math.min(2, Math.max(0.5, Number(v) || 1)),
   sentinelInterrupt: Boolean, sentinelNameOnly: Boolean, sentinelAuto: Boolean,
   sentinelSensitivity: (v) => { if (!['high', 'normal', 'low'].includes(v)) throw new Error('sentinelSensitivity must be high, normal or low'); return v; },
   profileName: (v) => String(v).slice(0, 100), profileAbout: (v) => String(v).slice(0, 2000)
 };
 const READ_KEYS = [...Object.keys(SAFE_SETTINGS), 'shellEnabled', 'computerEnabled', 'autoApproveEdits'];
 
+const READ_FS = new Set(['read_file', 'list_dir', 'search_files']);
 const GRANT_MS = 10 * 60 * 1000;
+// "Allow for 10 minutes" answers. Module scope: main rebuilds the tool list on every request.
+const sharedGrants = new Map();
 
 function buildArtemisTools(d) {
-  const grants = {};
+  const grants = d.grants || sharedGrants;
   // the theme list is JSON on disk, so refresh it from main whenever the tools are (re)built
   try {
     const live = d.themes && d.themes();
     if (Array.isArray(live) && live.length) themeIds = ['system', ...live.map((t) => t.id)];
   } catch {}
   const asked = async (key, title, detail) => {
-    if (grants[key] && grants[key] > Date.now()) return true;
+    if ((grants.get(key) || 0) > Date.now()) return true;
+    grants.delete(key);
     const r = await d.confirm({ title, detail, key });
-    if (r === 'grant') { grants[key] = Date.now() + GRANT_MS; return true; }
+    if (r === 'grant') { grants.set(key, Date.now() + GRANT_MS); return true; }
     return r === true || r === 'once';
   };
   const ro = { readOnlyHint: true };
@@ -68,6 +77,12 @@ function buildArtemisTools(d) {
         d.applySettings({ [key]: clean });
         return { ok: true, key, value: clean };
       }),
+    t('lock', 'Locks Artemis now (the app lock from Settings → Security). It only locks: unlocking needs the password, Touch ID or the owner\'s voice on the computer.', {}, [], async () => {
+      if (!d.lockNow) throw new Error('The app lock is not available.');
+      const r = d.lockNow();
+      if (!r || !r.ok) throw new Error((r && r.error) || 'The app lock is not set up (Settings → Security).');
+      return { locked: true };
+    }),
     t('set_theme', `Changes the color theme. Themes: ${knownThemes().join(', ')}.`, { theme: { type: 'string', enum: knownThemes() } }, ['theme'], async ({ theme }) => {
       d.applySettings({ theme: SAFE_SETTINGS.theme(theme) }); return { ok: true, theme };
     }),
@@ -121,13 +136,17 @@ function buildArtemisTools(d) {
     ...(d.files ? d.files.defs().map((def) => {
       const f = def.function;
       const props = { project: { type: 'string', description: 'Name of the Artemis project whose folder to use (see artemis_projects). Optional when there is only one project.' }, ...(f.parameters.properties || {}) };
-      return t('fs_' + f.name, f.description + ' Works inside the chosen project folder. The user is asked to confirm changes and commands (once, or for 10 minutes).', props, f.parameters.required || [], async (args) => {
+      return t('fs_' + f.name, f.description + ' Works inside the chosen project folder.' + (READ_FS.has(f.name) ? ' Absolute or ~ paths elsewhere on the computer can be read after the user approves.' : '') + ' The user is asked to confirm changes and commands (once, or for 10 minutes).', props, f.parameters.required || [], async (args) => {
         const { project, ...rest } = args || {};
         if (f.name === 'run_command' && d.getSettings().shellEnabled === false) throw new Error('Shell commands are switched off in Artemis (Settings → Access).');
         const root = d.files.rootOf(project);
         const approve = async (info) => {
-          const key = info.name === 'delete_file' ? 'fs:delete:' + Math.random() : info.category === 'shell' || info.name === 'run_command' ? 'fs:shell' : 'fs:write';
-          return asked(key, info.name === 'delete_file' ? 'Delete this from your project?' : 'Let an outside app change your files or run commands?', String(info.summary || info.name).slice(0, 600) + '\nProject folder: ' + root);
+          const del = info.name === 'delete_file';
+          const shellCmd = info.category === 'shell' || info.name === 'run_command';
+          const read = !del && !shellCmd && (info.category === 'outside-read' || READ_FS.has(info.name));
+          const key = del ? 'fs:delete:' + Math.random() : shellCmd ? 'fs:shell' : read ? 'fs:read' : 'fs:write';
+          const title = del ? 'Delete this from your project?' : shellCmd ? 'Let an outside app run a command on your computer?' : read ? 'Let an outside app read files on your computer?' : 'Let an outside app change your files?';
+          return asked(key, title, String(info.summary || info.name).slice(0, 600) + '\nProject folder: ' + root);
         };
         const r = await d.files.run(f.name, rest, { root, approve });
         if (r && r.denied) throw new Error(r.text);
@@ -136,10 +155,12 @@ function buildArtemisTools(d) {
       });
     }) : []),
     t('computer', "Sees and controls the user's Mac screen, like a person would: open apps and links, list the buttons of the front window, click them, type, press keys, scroll, take a screenshot. Prefer this over the terminal for anything that is done by clicking. Cheapest way: action \"open\" (app or https url), then \"ui\" to list clickable elements and \"click_ui\" with a name; chain steps with \"actions\"; use \"screenshot\" or look:true when you must see the screen, and always check with a screenshot after a click before telling the user it worked (never guess coordinates; they are pixels of the latest screenshot). The user is asked to confirm (once, or for 10 minutes).", {
-      action: { type: 'string', enum: ['screenshot', 'ui', 'click_ui', 'open', 'mouse_move', 'left_click', 'double_click', 'right_click', 'left_click_drag', 'scroll', 'type', 'key', 'wait'] },
+      action: { type: 'string', enum: ['screenshot', 'ui', 'click_ui', 'open', 'mouse_move', 'left_click', 'double_click', 'right_click', 'left_click_drag', 'scroll', 'type', 'key', 'wait', 'capture_screen', 'record_screen_start', 'record_screen_stop'] },
       actions: { type: 'array', description: 'Several actions in one call (max 15), each with the same fields as a single action.', items: { type: 'object' } },
       look: { type: 'boolean' }, query: str(200), role: str(40), app: str(200), url: str(2000), text: { type: 'string' }, keys: str(100), direction: str(10),
-      x: { type: 'number' }, y: { type: 'number' }, end_x: { type: 'number' }, end_y: { type: 'number' }, amount: { type: 'number' }, ms: { type: 'number' }
+      x: { type: 'number' }, y: { type: 'number' }, end_x: { type: 'number' }, end_y: { type: 'number' }, amount: { type: 'number' }, ms: { type: 'number' },
+      process: str(200), path: str(1000), display: str(10), window: {}, format: str(10), audio: { type: 'boolean' }, max_seconds: { type: 'number' },
+      region: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } } }
     }, [], async (args) => {
       if (!d.computer) throw new Error('Computer control is not available here.');
       if (d.getSettings().computerEnabled === false) throw new Error('Computer control is switched off in Artemis (Settings → Access). Ask the user to turn it on.');
@@ -157,4 +178,4 @@ function buildArtemisTools(d) {
   ];
 }
 
-module.exports = { buildArtemisTools, SAFE_SETTINGS, THEME_IDS, READ_KEYS };
+module.exports = { buildArtemisTools, SAFE_SETTINGS, THEME_IDS, READ_KEYS, sharedGrants };

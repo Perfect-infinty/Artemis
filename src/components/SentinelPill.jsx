@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { Icon } from './Icons.jsx';
+import { useSentinelKey } from '../lib/sentinelKey.js';
 
 const TEXT = {
   idle: 'Say “Wake up”',
@@ -9,7 +10,8 @@ const TEXT = {
 };
 
 /** Floating status for Sentinel mode: what it is doing right now, plus a stop button. */
-export default function SentinelPill({ state, info, err, heard, said, onStop, onSkip, onDismiss, onSettings, onLogs, floating = false, external = false, expanded = false, onToggle }) {
+export default function SentinelPill({ state, info, err, heard, said, onStop, onSkip, onDismiss, onSettings, onLogs, floating = false, external = false, expanded = false, onToggle, muted = false, onMute, noTalk = false, canExpand = false }) {
+  const sKey = useSentinelKey();
   const bar = useRef(null);
   useEffect(() => {
     const h = (e) => { if (bar.current) bar.current.style.transform = `scaleY(${0.25 + Math.min(1, e.detail || 0) * 0.75})`; };
@@ -28,15 +30,16 @@ export default function SentinelPill({ state, info, err, heard, said, onStop, on
             <b>Artemis · Sentinel</b>
             {state === 'loading'
               ? <span>{info && info.step ? `${info.step}/${info.of} · ` : ''}{(info && info.text) || 'Starting…'}{info && typeof info.progress === 'number' ? ` ${info.progress}%` : ''}{info && info.sec ? ` ${info.sec}s` : ''}</span>
-              : <span>{state === 'listening' && info && info.session ? 'Listening · say “bye bye” to end' : (TEXT[state] || '')}</span>}
+              : <span>{muted ? 'Mic muted · click the mic to listen' : state === 'listening' && info && info.tap ? `Listening… press ${info.tap} again to send` : state === 'listening' && info && info.session ? 'Listening · say “bye bye” to end' : state === 'idle' && info && info.pttOnly ? 'Press push-to-talk to speak' : (TEXT[state] || '')}</span>}
           </span>
-          {state === 'loading' && onLogs && <button className="sn-btn" title="See what is happening in the Logs" onClick={onLogs}><Icon name="terminal" size={12} /></button>}
-          {(state === 'speaking' || state === 'thinking' || state === 'listening') && <button className="sn-btn" title="Stop and wait for “Wake up” again" onClick={onSkip}><Icon name="stop" size={11} /></button>}
-          {floating && onToggle && (heard || said) && <button className="sn-btn" title={expanded ? 'Smaller' : 'Bigger: read the full messages'} onClick={onToggle}><Icon name={expanded ? 'compact' : 'expand'} size={12} /></button>}
-          <button className="sn-btn off" title="Turn Sentinel off (⇧⌘A)" onClick={onStop}><Icon name="x" size={12} /></button>
+          {state === 'loading' && onLogs && <button className="sn-btn" title="See what is happening in the Logs" aria-label="See what is happening in the Logs" onClick={onLogs}><Icon name="terminal" size={12} /></button>}
+          {(state === 'speaking' || state === 'thinking' || state === 'listening') && <button className="sn-btn" title="Stop and wait for “Wake up” again" aria-label="Stop and wait for “Wake up” again" onClick={onSkip}><Icon name="stop" size={11} /></button>}
+          {floating && onMute && state !== 'loading' && <button className={`sn-btn mic${muted ? ' muted' : ''}`} title={muted ? 'Turn the microphone back on' : 'Mute the microphone'} aria-label={muted ? 'Turn the microphone back on' : 'Mute the microphone'} aria-pressed={muted} onClick={onMute}><Icon name="mic" size={12} /></button>}
+          {floating && onToggle && (heard || said || canExpand) && <button className="sn-btn" title={expanded ? 'Smaller' : 'Bigger: read the full messages'} aria-label={expanded ? 'Smaller' : 'Bigger: read the full messages'} onClick={onToggle}><Icon name={expanded ? 'compact' : 'expand'} size={12} /></button>}
+          <button className="sn-btn off" title={`Turn Sentinel off${sKey}`} aria-label={`Turn Sentinel off${sKey}`} onClick={onStop}><Icon name="x" size={12} /></button>
         </div>
       )}
-      {state !== 'off' && state !== 'loading' && (heard || said) && (
+      {!noTalk && state !== 'off' && state !== 'loading' && (heard || said) && (
         <div className="sn-talk" ref={talk}>
           {heard && <p className="you" title={heard}><b>You</b><span>{heard}</span></p>}
           {said ? <p className="artemis" title={said}><b>Artemis</b><span>{said}</span></p> : (heard && state === 'thinking' ? <p className="artemis dim"><b>Artemis</b><span>…</span></p> : null)}

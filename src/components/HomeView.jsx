@@ -3,28 +3,35 @@ import { Icon } from './Icons.jsx';
 import Composer, { ChatPills } from './Composer.jsx';
 import { dayGroup } from '../lib/history.js';
 import { costOf, fmtUsd } from '../lib/cost.js';
+import { formatAccelerator } from '../lib/shortcuts.mjs';
 
 const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n)));
 const greet = () => { const h = new Date().getHours(); return h < 5 ? 'Working late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 const when = (t) => { if (!t) return ''; const d = new Date(t); const same = d.toDateString() === new Date().toDateString(); return (same ? 'Today' : d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
 
-function Widget({ title, icon, action, onAction, children, wide, span2 }) {
+function Widget({ title, icon, action, onAction, children, wide, span2, open, openTitle }) {
   return (
     <section className={"hw" + (wide ? " wide" : "") + (span2 ? " span2" : "")}>
-      <header className="hw-head"><Icon name={icon} size={15} /> <span>{title}</span>{action && <button className="link-btn hw-act" onClick={onAction}>{action}</button>}</header>
+      <header className="hw-head"><Icon name={icon} size={15} /> <span>{title}</span>{action && <button className="link-btn hw-act" onClick={onAction}>{action}</button>}{open && <button className="icon-btn hw-open" title={openTitle} aria-label={openTitle} onClick={open}><Icon name="chevronRight" size={15} /></button>}</header>
       <div className="hw-body">{children}</div>
     </section>
   );
 }
 
 // The Home page: a chat box plus small widgets for everything in the app.
-export default function HomeView({ chats, projects, notes, settings, memoryCount, connectorCount, sentinel, agentCount, statusOf, onSend, onOpenChat, onOpenProject, onOpenNote, onGo, composerProps }) {
+export default function HomeView({ chats, projects, notes, settings, memoryCount, connectorCount, sentinel, agentCount, statusOf, onSend, onOpenChat, onOpenProject, onOpenNote, onOpenFile, onGo, composerProps }) {
+  // the configured shortcuts, shown as ⌘K / Ctrl+K ('' = off)
+  const mac = window.api?.platform === 'darwin';
+  const st = settings || {};
+  const keys = { palette: formatAccelerator(st.paletteShortcut ?? 'CommandOrControl+K', mac), quickChat: formatAccelerator(st.quickChatShortcut, mac), quickSearch: formatAccelerator(st.quickSearchShortcut, mac), sentinel: formatAccelerator(st.sentinelShortcut ?? 'CommandOrControl+Shift+A', mac), find: formatAccelerator('CommandOrControl+F', mac) };
   const [draft, setDraft] = useState({}); // choices for the chat that the box below starts
   const up = (patch) => setDraft((d) => ({ ...d, ...patch }));
   const cp = composerProps || {};
   const brain = draft.brain !== undefined ? draft.brain : (settings.defaultBrain || '');
   const model = draft.model || cp.defaultModel;
   const [jobs, setJobs] = useState([]);
+  const [files, setFiles] = useState([]);
+  useEffect(() => { window.api.libList().then((r) => setFiles(r && r.ok ? r.items.slice(0, 5) : [])).catch(() => {}); }, []);
   const [usage, setUsage] = useState(null);
   useEffect(() => {
     let live = true;
@@ -59,7 +66,7 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
             projectId={draft.projectId || null} projects={projects} onProject={(id) => up({ projectId: id })}
             model={model} settings={settings} onUsageDetails={cp.onUsageDetails} onOpenSettings={cp.onOpenSettings} />
         </div>
-        <Composer key="home" streaming={false} onStop={() => {}} onSend={(t, a) => { onSend(t, a, { ...draft, brain, model }); setDraft({}); }} placeholder="Ask anything, start a new chat…"
+        <Composer key="home" chatId="draft:home" streaming={false} onStop={() => {}} onSend={(t, a, x) => { onSend(t, a, { ...draft, brain, model, ...(x || {}) }); setDraft({}); }} placeholder="Ask anything, start a new chat…"
           model={model} onModel={(m) => up({ model: m })} groups={cp.groups || []} projects={projects} projectId={draft.projectId || null} onProject={(id) => up({ projectId: id })}
           settings={settings} onUsageDetails={cp.onUsageDetails} onOpenSettings={cp.onOpenSettings}
           tools={draft.tools || 'on'} onTools={(v) => up({ tools: v })} agents={draft.agents || 'on'} onAgents={(v) => up({ agents: v })}
@@ -80,26 +87,31 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
           {running.length > 0 && <div className="muted small hw-note">{running.length} running right now</div>}
         </Widget>
 
-        <Widget title={pinnedProjects.length ? 'Pinned projects' : 'Projects'} icon="folders" action="All" onAction={() => onGo('projects')}>
+        <Widget title={pinnedProjects.length ? 'Pinned projects' : 'Projects'} icon="folders" action="All" onAction={() => onGo('projects')} open={() => onGo('projects')} openTitle="Open Projects">
           {shownProjects.length === 0 ? <div className="muted small">No projects yet.</div> : shownProjects.map((p) => (
             <button key={p.id} className="hw-row" onClick={() => onOpenProject(p.id)}><Icon name="folder" size={14} /><span className="t">{p.name}</span><span className="muted small">{chats.filter((c) => c.projectId === p.id).length}</span></button>
           ))}
         </Widget>
 
-        <Widget title="Notes" icon="file" action="New note" onAction={() => onGo('newnote')}>
+        <Widget title="Notes" icon="file" action="New note" onAction={() => onGo('newnote')} open={() => onGo('graph')} openTitle="Open notes graph">
           {recentNotes.length === 0 ? <div className="muted small">No notes yet.</div> : recentNotes.map((n) => (
             <button key={n.path} className="hw-row" onClick={() => onOpenNote(n.path)}><Icon name="file" size={14} /><span className="t">{n.name}</span></button>
           ))}
         </Widget>
 
-        <Widget title="Coming up" icon="clock" action="Scheduled" onAction={() => onGo('schedule')}>
+        <Widget title="Files" icon="folder" action="All" onAction={() => onGo('files')} open={() => onGo('files')} openTitle="Open Files">
+          {files.length === 0 ? <div className="muted small">No files yet. Attach one in a chat.</div> : files.map((f) => (
+            <button key={f.path} className="hw-row" onClick={() => onOpenFile && onOpenFile(f.path)}><Icon name={f.kind === 'image' ? 'image' : 'file'} size={14} /><span className="t">{f.name}</span></button>
+          ))}
+        </Widget>
+        <Widget title="Coming up" icon="clock" action="Scheduled" onAction={() => onGo('schedule')} open={() => onGo('schedule')} openTitle="Open Scheduled">
           {upcoming.length === 0 ? <div className="muted small">Nothing scheduled.</div> : upcoming.map((j) => (
             <button key={j.id} className="hw-row" onClick={() => onGo('schedule')}><Icon name="clock" size={14} /><span className="t">{j.name}</span><span className="muted small">{when(j.nextRun)}</span></button>
           ))}
         </Widget>
 
-        <Widget title="Usage" icon="chart" action="Details" onAction={() => onGo('usage')}>
-          {usage === null ? <div className="muted small">Loading…</div> : (
+        <Widget title="Usage" icon="chart" action="Details" onAction={() => onGo('usage')} open={() => onGo('usage')} openTitle="Open Usage" span2>
+          {usage === null ? <div className="skeleton-rows" role="status" aria-label="Loading"><i /><i /><i /></div> : (
             <div className="hw-stats">
               <div><b>{fmtTok(dayU.tok)}</b><span>tokens today</span></div>
               <div><b>{fmtUsd(dayU.cost)}</b><span>cost today</span></div>
@@ -109,8 +121,9 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
           )}
         </Widget>
 
-        <Widget title="Shortcuts" icon="bolt" span2>
+        <Widget title="Shortcuts" icon="bolt" wide>
           <div className="hw-tiles">
+            <button onClick={() => onGo('palette')} title={keys.palette ? `Command palette (${keys.palette})` : 'Command palette'}><Icon name="search" size={16} /> Search {keys.palette ? <span className="muted small">{keys.palette}</span> : null}</button>
             <button onClick={() => onGo('sentinel')}><Icon name="mic" size={16} /> Sentinel <span className="muted small">{sentinel === 'off' ? 'Off' : 'On'}</span></button>
             <button onClick={() => onGo('agents')}><Icon name="user" size={16} /> Agents{agentCount ? <span className="count">{agentCount} running</span> : null}</button>
             <button onClick={() => onGo('skills')}><Icon name="sparkle" size={16} /> Skills</button>
@@ -122,6 +135,13 @@ export default function HomeView({ chats, projects, notes, settings, memoryCount
             <button onClick={() => onGo('logs')}><Icon name="code" size={16} /> Logs</button>
             <button onClick={() => onGo('settings')}><Icon name="sliders" size={16} /> Settings</button>
           </div>
+          <div className="muted small hw-note">Find in chat or note <kbd>{keys.find}</kbd></div>
+          {(keys.quickChat || keys.quickSearch || keys.sentinel) ? (
+            <div className="muted small hw-note">
+              From any app: {[keys.quickChat && <>Quick chat <kbd>{keys.quickChat}</kbd></>, keys.quickSearch && <>Quick search <kbd>{keys.quickSearch}</kbd></>, keys.sentinel && <>Sentinel on/off <kbd>{keys.sentinel}</kbd></>].filter(Boolean).map((x, i) => <React.Fragment key={i}>{i ? ' · ' : ''}{x}</React.Fragment>)}
+              {' '}<button className="link" onClick={() => onGo('settings')}>Change</button>
+            </div>
+          ) : null}
         </Widget>
       </div>
     </div>

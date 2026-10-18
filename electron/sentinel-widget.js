@@ -2,18 +2,70 @@
 // window is minimized or hidden, can be dragged anywhere, and remembers where you left it.
 const path = require('path');
 
+// The widget grows and shrinks from the corner it sits in: near the bottom of the screen it grows upwards, near the right edge to the left,
+// so the spot the user dragged it to stays put. Always kept fully on the screen.
+function fitBounds(cur, size, wa, margin = 4) {
+  const width = Math.round(Math.min(size.width, wa.width - margin * 2));
+  const height = Math.round(Math.min(size.height, wa.height - margin * 2));
+  const cw = cur.width || width, ch = cur.height || height;
+  const relX = (cur.x + cw / 2 - wa.x) / wa.width, relY = (cur.y + ch / 2 - wa.y) / wa.height;
+  let x = relX < 1 / 3 ? cur.x : relX > 2 / 3 ? cur.x + cw - width : cur.x + cw / 2 - width / 2;
+  let y = relY > 0.5 ? cur.y + ch - height : cur.y;
+  x = Math.min(Math.max(x, wa.x + margin), wa.x + wa.width - width - margin);
+  y = Math.min(Math.max(y, wa.y + margin), wa.y + wa.height - height - margin);
+  return { x: Math.round(x), y: Math.round(y), width, height };
+}
+
+/** Where "move the widget left / right / up / down" puts it, on the screen it is on now. */
+function placeAt(cur, side, wa, margin = 12) {
+  const b = { ...cur };
+  if (side === 'left') b.x = wa.x + margin;
+  else if (side === 'right') b.x = wa.x + wa.width - cur.width - margin;
+  else if (side === 'up' || side === 'top') b.y = wa.y + margin;
+  else if (side === 'down' || side === 'bottom') b.y = wa.y + wa.height - cur.height - margin;
+  else if (side === 'center') { b.x = Math.round(wa.x + (wa.width - cur.width) / 2); b.y = wa.y + margin; }
+  return fitBounds(b, { width: cur.width, height: cur.height }, wa, 0);
+}
+
+const SIZES = { compact: { width: 300, maxH: 380 }, expanded: { width: 420, maxH: 560 }, viewer: { width: 720, maxH: 640 } };
+// The expanded card (mini chat) and the viewer (an artifact or a file) have a fixed size the user picks: S, M or L.
+// The viewer is also capped to a share of the screen (frac), so a big preset never covers a small screen.
+const PRESETS = {
+  expanded: { S: { width: 360, height: 440 }, M: { width: 420, height: 560 }, L: { width: 520, height: 700 } },
+  viewer: { S: { width: 560, height: 480, frac: 0.5 }, M: { width: 720, height: 640, frac: 0.6 }, L: { width: 960, height: 820, frac: 0.85 } }
+};
+const MIN_H = 48;
+
+/**
+ * How big the widget should be. mode: 'compact' (the pill, as tall as its content `h`), 'expanded' (the mini chat) or 'viewer'.
+ * size: 'S' | 'M' | 'L'. wa: the work area of the screen it is on. Pure, so it can be tested.
+ */
+function sizeFor(mode, size, h, wa) {
+  if (mode === true) mode = 'expanded'; // older callers sent "wide"
+  if (mode === 'expanded' || mode === 'viewer') {
+    const p = PRESETS[mode][size] || PRESETS[mode].M;
+    let { width, height } = p;
+    if (p.frac && wa) {
+      width = Math.min(width, Math.max(SIZES.expanded.width, Math.floor(wa.width * p.frac)));
+      height = Math.min(height, Math.max(SIZES.expanded.maxH * 0.8, Math.floor(wa.height * Math.min(0.9, p.frac + 0.2))));
+    }
+    return { width: Math.round(width), height: Math.round(height) };
+  }
+  return { width: SIZES.compact.width, height: Math.max(MIN_H, Math.min(SIZES.compact.maxH, Math.round(Number(h) || MIN_H))) };
+}
+
 function createSentinelWidget({ BrowserWindow, screen, isDev, getPos, setPos }) {
-  let w = null; let moveTimer = null;
-  const WIDTH = 300, WIDE = 460, MIN_H = 48;
+  let w = null; let moveTimer = null; let selfMoveUntil = 0;
+  const WIDTH = SIZES.compact.width;
   const alive = () => !!w && !w.isDestroyed();
+  const areaOf = (b) => screen.getDisplayNearestPoint({ x: Math.round(b.x + (b.width || 0) / 2), y: Math.round(b.y + (b.height || 0) / 2) }).workArea;
 
   function startPos() {
     const saved = getPos && getPos();
     if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
-      // keep it on a screen that still exists
-      const d = screen.getDisplayNearestPoint({ x: saved.x, y: saved.y });
-      const b = d.workArea;
-      return { x: Math.min(Math.max(saved.x, b.x - WIDTH + 80), b.x + b.width - 80), y: Math.min(Math.max(saved.y, b.y), b.y + b.height - 60) };
+      // keep it on a screen that still exists, anchored the way it was left
+      const cur = { x: saved.x, y: saved.y, width: Number(saved.width) || WIDTH, height: Number(saved.height) || MIN_H };
+      return fitBounds(cur, { width: WIDTH, height: MIN_H }, areaOf(cur));
     }
     const wa = screen.getPrimaryDisplay().workArea;
     return { x: Math.round(wa.x + (wa.width - WIDTH) / 2), y: wa.y + 12 };
@@ -34,7 +86,8 @@ function createSentinelWidget({ BrowserWindow, screen, isDev, getPos, setPos }) 
     w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     w.on('move', () => {
       clearTimeout(moveTimer);
-      moveTimer = setTimeout(() => { if (alive() && setPos) { const [x, y] = w.getPosition(); setPos({ x, y }); } }, 400);
+      if (Date.now() < selfMoveUntil) return; // our own grow / shrink, not a drag
+      moveTimer = setTimeout(() => { if (alive() && setPos && Date.now() >= selfMoveUntil) setPos(w.getBounds()); }, 400);
     });
     w.on('closed', () => { w = null; });
   }
@@ -47,16 +100,31 @@ function createSentinelWidget({ BrowserWindow, screen, isDev, getPos, setPos }) 
   function hide() { if (alive()) w.hide(); }
   function destroy() { if (alive()) w.destroy(); w = null; }
   function send(channel, payload) { if (alive() && !w.webContents.isLoading()) w.webContents.send(channel, payload); }
-  /** The page reports how tall its content is. */
-  function resize(h, wide) {
-    if (!alive()) return;
-    const width = wide ? WIDE : WIDTH;
-    const height = Math.max(MIN_H, Math.min(wide ? 600 : 380, Math.round(Number(h) || MIN_H)));
-    const [cw, cur] = w.getSize();
-    if (cur === height && cw === width) return;
-    w.setResizable(true); w.setSize(width, height); w.setResizable(false);
+  function apply(b) {
+    const cur = w.getBounds();
+    if (cur.x === b.x && cur.y === b.y && cur.width === b.width && cur.height === b.height) return;
+    selfMoveUntil = Date.now() + 700;
+    w.setResizable(true);
+    try { w.setBounds(b, process.platform === 'darwin'); } catch { w.setBounds(b); } // animated on macOS
+    w.setResizable(false);
   }
-  return { show, hide, destroy, send, resize, isVisible: () => alive() && w.isVisible(), get window() { return alive() ? w : null; } };
+  /** The page reports how tall its content is, its mode (the compact pill, the expanded chat or the viewer) and the S / M / L size. */
+  function resize(h, mode, size) {
+    if (!alive()) return;
+    const cur = w.getBounds();
+    const wa = areaOf(cur);
+    apply(fitBounds(cur, sizeFor(mode, size, h, wa), wa));
+  }
+  /** "Move the widget left": to that edge of the screen it is on. */
+  function moveTo(side) {
+    if (!alive()) return false;
+    const cur = w.getBounds();
+    const b = placeAt(cur, side, areaOf(cur));
+    apply(b);
+    if (setPos) setPos(b);
+    return true;
+  }
+  return { show, hide, destroy, send, resize, moveTo, isVisible: () => alive() && w.isVisible(), get window() { return alive() ? w : null; } };
 }
 
-module.exports = { createSentinelWidget };
+module.exports = { createSentinelWidget, fitBounds, placeAt, sizeFor, SIZES, PRESETS };

@@ -155,7 +155,7 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
     });
   };
 
-  // ---- panoya
+  // ---- clipboard
   const rangeText = (fmt) => { const lines = []; for (let r = R.r1; r <= R.r2; r++) { const cells = []; for (let c = R.c1; c <= R.c2; c++) cells.push(fmt(r, c)); lines.push(cells.join('\t')); } return lines.join('\n'); };
   const onCopy = (e) => { if (edit) return; e.preventDefault(); e.clipboardData.setData('text/plain', rangeText((r, c) => { const t = shown(r, c); return /[\t\n"]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; })); };
   const onCut = (e) => { onCopy(e); if (!edit) clearRange(); };
@@ -169,7 +169,7 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
     if (ch.length) { setCells(ch); setRng({ r1: R.r1, c1: R.c1, r2: R.r1 + grid.length - 1, c2: R.c1 + Math.max(...grid.map((g) => g.length)) - 1 }); }
   };
 
-  // ---- klavye
+  // ---- keyboard
   const onKeyDown = (e) => {
     if (e.target.tagName === 'INPUT') return;
     const mod = e.metaKey || e.ctrlKey;
@@ -200,7 +200,7 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
     else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
   };
 
-  // ---- fare
+  // ---- mouse
   const down = (r, c, e) => {
     if (edit && !(edit.r === r && edit.c === c)) commit(null);
     dragging.current = true;
@@ -224,7 +224,7 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
     setWidths((w) => ({ ...w, [si + ':' + c]: Math.max(MIN_W, Math.min(420, m * 7.2 + 18)) }));
   };
 
-  // ---- sayfalar
+  // ---- sheets
   const addSheet = () => { let n = sheets.length + 1; while (sheets.some((s) => s.name === 'Sheet' + n)) n++; apply([...sheets, { name: 'Sheet' + n, rows: [] }]); setSi(sheets.length); };
   const delSheet = async (i) => { if (sheets.length < 2 || !(await askConfirm({ title: 'Delete sheet', message: `Delete sheet "${sheets[i].name}"?`, confirmLabel: 'Delete', danger: true }))) return; apply(sheets.filter((_, k) => k !== i)); setSi(Math.max(0, Math.min(si, sheets.length - 2))); };
   const doRename = () => {
@@ -235,7 +235,7 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
   };
   useEffect(() => { setSel({ r: 0, c: 0 }); setRng({ r1: 0, c1: 0, r2: 0, c2: 0 }); setEdit(null); if (box.current) { box.current.scrollTop = 0; box.current.scrollLeft = 0; } }, [si]);
 
-  // ---- arama
+  // ---- search
   const needle = q.trim().toLowerCase();
   const matches = useMemo(() => {
     if (!needle) return [];
@@ -318,8 +318,8 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
   return (
     <div className="sheet">
       <div className="sh-toolbar">
-        <button title="Undo (Ctrl+Z)" onClick={doUndo} disabled={!undo.current.length}>↶</button>
-        <button title="Redo (Ctrl+Y)" onClick={doRedo} disabled={!redo.current.length}>↷</button>
+        <button title="Undo (Ctrl+Z)" aria-label="Undo (Ctrl+Z)" onClick={doUndo} disabled={!undo.current.length}>↶</button>
+        <button title="Redo (Ctrl+Y)" aria-label="Redo (Ctrl+Y)" onClick={doRedo} disabled={!redo.current.length}>↷</button>
         <span className="sep" />
         <button title="Insert row above" onClick={() => insertRows(R.r1)}>+ Row</button>
         <button title="Delete selected rows" onClick={deleteRows}>− Row</button>
@@ -376,11 +376,11 @@ export default function SheetEditor({ path, name, onDirty, onSaved }) {
           {sheets.map((s, i) => (
             rename && rename.i === i
               ? <input key={i} className="sh-rename" autoFocus value={rename.value} onChange={(e) => setRename({ i, value: e.target.value })} onBlur={doRename} onKeyDown={(e) => { if (e.key === 'Enter') doRename(); if (e.key === 'Escape') setRename(null); }} />
-              : <button key={i} className={i === si ? 'active' : ''} onClick={() => setSi(i)} onDoubleClick={() => setRename({ i, value: s.name })} title="Double-click to rename">
+              : <button key={i} className={i === si ? 'active' : ''} onClick={() => setSi(i)} onDoubleClick={() => setRename({ i, value: s.name })} title="Double-click to rename" aria-label="Double-click to rename">
                 {s.name}{i === si && sheets.length > 1 && <b className="x" onClick={(e) => { e.stopPropagation(); delSheet(i); }} title="Delete sheet">×</b>}
               </button>
           ))}
-          <button className="add" onClick={addSheet} title="Add sheet">+</button>
+          <button className="add" onClick={addSheet} title="Add sheet" aria-label="Add sheet">+</button>
         </div>
         <span className="sh-stat">
           {summary.cnt > 1 ? `Count ${summary.cnt}` : ''}{summary.n > 1 ? ` · Sum ${formatValue(Number(summary.sum.toPrecision(12)))} · Avg ${formatValue(Number((summary.sum / summary.n).toPrecision(8)))}` : ''}

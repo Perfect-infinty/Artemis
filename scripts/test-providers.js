@@ -6,6 +6,12 @@ assert.strictEqual(P.joinUrl('https://api.example.com/', '/v1/models'), 'https:/
 assert.strictEqual(P.joinUrl('http://localhost:11434/v1', 'chat/completions'), 'http://localhost:11434/v1/chat/completions');
 assert.strictEqual(P.joinUrl('https://openrouter.ai/api/v1/', 'models'), 'https://openrouter.ai/api/v1/models');
 assert.strictEqual(P.joinUrl('https://api.cloudflare.com/client/v4/accounts/abc/ai/v1', 'chat/completions'), 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions');
+// a base with its own version path is used as is; /v1 is added only to a bare host
+assert.strictEqual(P.joinUrl('https://generativelanguage.googleapis.com/v1beta/openai', 'chat/completions'), 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
+assert.strictEqual(P.joinUrl('https://ark.example.com/api/v3/', 'chat/completions'), 'https://ark.example.com/api/v3/chat/completions');
+assert.strictEqual(P.joinUrl('https://api.groq.com/openai', 'models'), 'https://api.groq.com/openai/models');
+assert.strictEqual(P.joinUrl('https://openrouter.ai/api/v1', 'v1/models'), 'https://openrouter.ai/api/v1/models');
+assert.strictEqual(P.joinUrl('http://localhost:3456/', 'chat/completions'), 'http://localhost:3456/v1/chat/completions');
 // ids
 const id = P.prefixId('ab12', 'llama3.2:3b');
 assert.strictEqual(id, 'prov:ab12:llama3.2:3b');

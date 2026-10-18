@@ -16,5 +16,7 @@ const { createComputer } = require('../electron/computer');
     console.log('saved to', f, '(open it: it should show your real screen, not just the wallpaper)');
     r = await c.run({ action: 'mouse_move', x: 200, y: 200 });
     console.log('mouse move:', r.ok ? 'OK (the cursor should have jumped)' : 'FAILED - ' + r.text);
+    r = await c.run({ action: 'ui' });
+    console.log('ui (front window + system toolbars/dialogs):', r.ok ? 'OK\n' + r.text.split('\n').filter((l) => l.startsWith('[') || l.startsWith('(')).join('\n') : 'FAILED - ' + r.text);
   }
 })();

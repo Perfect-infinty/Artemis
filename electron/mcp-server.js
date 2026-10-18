@@ -12,7 +12,7 @@ const safeEqual = (a, b) => {
 };
 const hostOk = (h) => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(String(h || ''));
 
-function createMcpServer({ getToken, tools = () => [], info = { name: 'artemis', version: '1.0.0' }, log = () => {} }) {
+function createMcpServer({ getToken, tools = () => [], info = { name: 'artemis', version: '1.0.0' }, log = () => {}, isLocked = () => false }) {
   let server = null, listening = 0;
   const toolList = () => (typeof tools === 'function' ? tools() : tools);
 
@@ -35,6 +35,7 @@ function createMcpServer({ getToken, tools = () => [], info = { name: 'artemis',
         const name = msg.params && msg.params.name;
         const t = toolList().find((x) => x.name === name);
         if (!t) return fail(-32602, `Unknown tool: ${name}`);
+        if (isLocked()) return reply({ content: [{ type: 'text', text: 'Artemis is locked. Unlock it on the computer first.' }], isError: true }); // the app lock stops outside apps too
         try {
           const args = (msg.params && msg.params.arguments) || {};
           log('info', `${name} ${JSON.stringify(args).slice(0, 300)}`);

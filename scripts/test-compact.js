@@ -18,7 +18,7 @@ const assert = require('assert');
   assert.strictEqual(await summarizeHistory(h, opts), true);
   assert.strictEqual(calls, 1);
   assert.ok(h[0].content.includes('SUMMARY-1'));
-  assert.strictEqual(h[1].content, 'latest request');           // son istek korunur
+  assert.strictEqual(h[1].content, 'latest request');           // the latest request is kept
   assert.strictEqual(h[h.length - 1].role, 'tool');             // tool pair is not split
   assert.strictEqual(h.length, 4);
   assert.ok(lastBody.messages[1].content.includes('question 0'));

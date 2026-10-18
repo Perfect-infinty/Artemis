@@ -104,18 +104,71 @@ export function createEvaluator(sheets) {
   const byName = (n) => { const i = sheets.findIndex((s) => s.name.toLowerCase() === String(n).toLowerCase()); if (i < 0) throw E('#REF!'); return i; };
   const raw = (si, r, c) => { const row = sheets[si].rows[r]; return row ? row[c] : undefined; };
 
+  const isFormula = (v) => typeof v === 'string' && v.length > 1 && v[0] === '=';
+  const astOf = (v) => { let ast = asts.get(v); if (!ast) { ast = parse(tokenize(v.slice(1))); asts.set(v, ast); } return ast; };
+
+  // Formula cells a formula refers to (refs and ranges), for dependency-first evaluation.
+  const depCache = new Map();
+  function depsOf(si, r, c) {
+    const v = raw(si, r, c);
+    let refs = depCache.get(v + '\u0000' + si);
+    if (!refs) {
+      refs = [];
+      let ast; try { ast = astOf(v); } catch { ast = null; }
+      const visit = (n) => {
+        if (!n || typeof n !== 'object') return;
+        if (n.t === 'ref' || n.t === 'range') { try { refs.push({ ...n, s: n.sheet ? byName(n.sheet) : si }); } catch {} return; }
+        if (n.t === 'bin') { visit(n.l); visit(n.r); } else if (n.t === 'neg') visit(n.e); else if (n.t === 'fn') n.args.forEach(visit);
+      };
+      visit(ast);
+      depCache.set(v + '\u0000' + si, refs);
+    }
+    const out = [];
+    for (const n of refs) {
+      if (n.t === 'ref') { if (isFormula(raw(n.s, n.r, n.c))) out.push([n.s, n.r, n.c]); continue; }
+      const rows = sheets[n.s].rows, r2 = Math.min(n.r2, rows.length - 1);
+      for (let rr = n.r1; rr <= r2; rr++) { const row = rows[rr]; if (!row) continue; const c2 = Math.min(n.c2, row.length - 1); for (let cc = n.c1; cc <= c2; cc++) if (isFormula(row[cc])) out.push([n.s, rr, cc]); }
+    }
+    return out;
+  }
+
+  // Evaluates the cells a formula depends on first, with an explicit stack, so long chains (A2=A1+1 ... A100000)
+  // never recurse deeply. Cycles are left to the normal evaluation, which reports #CYCLE!.
+  let priming = false;
+  function prime(si, r, c) {
+    priming = true;
+    const onPath = new Set([si + ':' + r + ':' + c]);
+    const st = [{ si, r, c, deps: null, i: 0 }];
+    try {
+      while (st.length) {
+        const f = st[st.length - 1];
+        if (!f.deps) f.deps = depsOf(f.si, f.r, f.c);
+        let pushed = false;
+        while (f.i < f.deps.length) {
+          const [ds, dr, dc] = f.deps[f.i++];
+          const k = ds + ':' + dr + ':' + dc;
+          if (memo.has(k) || onPath.has(k)) continue;
+          onPath.add(k); st.push({ si: ds, r: dr, c: dc, deps: null, i: 0 }); pushed = true; break;
+        }
+        if (pushed) continue;
+        st.pop(); onPath.delete(f.si + ':' + f.r + ':' + f.c);
+        if (st.length) cellValue(f.si, f.r, f.c);
+      }
+    } finally { priming = false; }
+  }
+
   function cellValue(si, r, c) {
     const key = si + ':' + r + ':' + c;
     if (memo.has(key)) return memo.get(key);
     const v = raw(si, r, c);
     let out;
-    if (typeof v === 'string' && v.length > 1 && v[0] === '=') {
+    if (isFormula(v)) {
       if (stack.has(key)) return E('#CYCLE!');
+      if (!priming && !stack.size) prime(si, r, c);
+      if (memo.has(key)) return memo.get(key);
       stack.add(key);
       try {
-        let ast = asts.get(v);
-        if (!ast) { ast = parse(tokenize(v.slice(1))); asts.set(v, ast); }
-        out = evalAst(ast, si);
+        out = evalAst(astOf(v), si);
         if (out && out.__range) out = out.values[0] ?? 0;
       } catch (e) { out = isErr(e) ? e : E('#VALUE!'); }
       stack.delete(key);
@@ -139,8 +192,8 @@ export function createEvaluator(sheets) {
   const FN = {
     SUM: (a, si) => flat(a, si, true).reduce((x, y) => x + y, 0),
     AVERAGE: (a, si) => { const v = flat(a, si, true); if (!v.length) throw E('#DIV/0!'); return v.reduce((x, y) => x + y, 0) / v.length; },
-    MIN: (a, si) => { const v = flat(a, si, true); return v.length ? Math.min(...v) : 0; },
-    MAX: (a, si) => { const v = flat(a, si, true); return v.length ? Math.max(...v) : 0; },
+    MIN: (a, si) => { const v = flat(a, si, true); return v.length ? v.reduce((x, y) => (y < x ? y : x)) : 0; },
+    MAX: (a, si) => { const v = flat(a, si, true); return v.length ? v.reduce((x, y) => (y > x ? y : x)) : 0; },
     COUNT: (a, si) => flat(a, si, true).length,
     COUNTA: (a, si) => flat(a, si, false).length,
     PRODUCT: (a, si) => flat(a, si, true).reduce((x, y) => x * y, 1),
@@ -148,7 +201,11 @@ export function createEvaluator(sheets) {
     ABS: (a, si) => Math.abs(num(evalAst(a[0], si))),
     SQRT: (a, si) => { const n = num(evalAst(a[0], si)); if (n < 0) throw E('#NUM!'); return Math.sqrt(n); },
     INT: (a, si) => Math.floor(num(evalAst(a[0], si))),
-    ROUND: (a, si) => { const n = num(evalAst(a[0], si)), d = a[1] ? num(evalAst(a[1], si)) : 0; const f = 10 ** d; return Math.round((n + Number.EPSILON) * f) / f; },
+    ROUND: (a, si) => { // half away from zero, like Excel: ROUND(-2.5,0) = -3
+      const n = num(evalAst(a[0], si)), d = Math.trunc(a[1] ? num(evalAst(a[1], si)) : 0); const f = 10 ** d;
+      const x = Math.abs(n) * f;
+      return (Math.sign(n) * Math.round(x * (1 + Number.EPSILON))) / f;
+    },
     POWER: (a, si) => num(evalAst(a[0], si)) ** num(evalAst(a[1], si)),
     MOD: (a, si) => { const d = num(evalAst(a[1], si)); if (d === 0) throw E('#DIV/0!'); const n = num(evalAst(a[0], si)); return n - d * Math.floor(n / d); },
     LEN: (a, si) => str(evalAst(a[0], si)).length,
@@ -162,7 +219,7 @@ export function createEvaluator(sheets) {
     AND: (a, si) => flat(a, si, false).every(bool),
     OR: (a, si) => flat(a, si, false).some(bool),
     NOT: (a, si) => !bool(evalAst(a[0], si)),
-    TODAY: () => new Date().toISOString().slice(0, 10),
+    TODAY: () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }, // local date
     SUMIF: (a, si) => {
       const rng = evalAst(a[0], si); const test = criteriaFn(evalAst(a[1], si)); const sumR = a[2] ? evalAst(a[2], si) : rng;
       if (!rng.__range) throw E('#VALUE!');

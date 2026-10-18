@@ -14,4 +14,14 @@ assert.strictEqual(n.rename('Ideas.md', 'Thoughts').path, 'Thoughts.md');
 assert.strictEqual(n.move('Thoughts.md', 'Work').path, 'Work/Thoughts.md');
 assert(n.list().some((f) => f.path === 'Work' && f.dir));
 n.remove('Work'); assert.strictEqual(n.list().filter((f) => !f.dir).length, 1);
+// link graph + assets next to a note
+n.write('G1', 'see [[G2]], ![[Nope|x]] and [[G2]] again'); n.write('G2', 'back to [[G1]]');
+const g = n.graph();
+assert(g.edges.some((e) => e.from === 'G1.md' && e.to === 'G2.md') && g.edges.some((e) => e.from === 'G2.md' && e.to === 'G1.md'));
+assert.strictEqual(g.edges.filter((e) => e.from === 'G1.md' && e.to === 'G2.md').length, 1);
+assert(g.nodes.some((x) => !x.exists && x.name === 'Nope'));
+const a1 = n.saveAsset('G1.md', 'my pic.png', Buffer.from('png').toString('base64')); assert.strictEqual(a1.name, 'my-pic.png');
+assert.strictEqual(n.saveAsset('G1.md', 'my pic.png', Buffer.from('png').toString('base64')).name, 'my-pic-2.png');
+assert(n.readAsset('G1.md', 'my-pic.png').url.startsWith('data:image/png;base64,'));
+assert.throws(() => n.readAsset('G1.md', '../../etc/passwd'));
 console.log('notes: all tests passed');

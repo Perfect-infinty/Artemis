@@ -3,6 +3,7 @@ import Select from './Select.jsx';
 import { askConfirm } from '../lib/dialog.js';
 import React, { useEffect, useState, useContext } from 'react';
 import { PageContext } from '../lib/pageContext.js';
+import { Row } from './settings/ui.jsx';
 import { splitSheets } from '../lib/preview.js';
 import { Icon } from './Icons.jsx';
 import ProjectLogo from './ProjectLogo.jsx';
@@ -53,9 +54,9 @@ export function ImportRow() {
     } finally { setBusy(false); }
   };
   return (
-    <Field label="Import chats" hint="Bring your history from ChatGPT or Claude: request your data export in their settings, then choose the .zip (or conversations.json) here.">
-      <div className="row"><button onClick={go} disabled={busy}>{busy ? 'Reading…' : 'Import from ChatGPT or Claude…'}</button>{msg && <small className="hint">{msg}</small>}</div>
-    </Field>
+    <Row label="Import chats" description={msg || 'Bring your history from ChatGPT or Claude: request your data export in their settings, then choose the .zip (or conversations.json) here.'}>
+      <button type="button" className="pref-btn" onClick={go} disabled={busy}>{busy ? 'Reading…' : 'Import…'}</button>
+    </Row>
   );
 }
 
@@ -95,13 +96,21 @@ export function UsageModal({ onClose, projects = [], chats = [] }) {
   const Table = ({ title, data }) => (
     <div className="usage-block">
       <div className="section-title">{title}</div>
-      {data.length === 0 ? <div className="muted small">No data.</div> : data.map((g) => (
-        <div key={g.key} className="usage-row" title={`${g.requests} requests`}>
-          <div className="usage-name">{g.key}</div>
-          <div className="usage-bar"><i style={{ width: `${((g.prompt + g.completion) / max(data)) * 100}%` }} /></div>
-          <div className="usage-num"><b>{fmt(g.prompt + g.completion)}</b><span className="muted small"> · {fmtUsd(g.cost)} · in {fmt(g.prompt)} / out {fmt(g.completion)} · {g.requests} req</span></div>
+      {data.length === 0 ? <div className="muted small">No data.</div> : (
+        <div className="usage-table">
+          <div className="usage-row usage-hd"><span>Name</span><span /><span>Tokens</span><span>Cost</span><span>In / out</span><span>Req</span></div>
+          {data.map((g) => (
+            <div key={g.key} className="usage-row" title={`${g.requests} requests`}>
+              <div className="usage-name" title={g.key}>{g.key}</div>
+              <div className="usage-bar"><i style={{ width: `${((g.prompt + g.completion) / max(data)) * 100}%` }} /></div>
+              <b className="usage-n">{fmt(g.prompt + g.completion)}</b>
+              <span className="usage-n">{fmtUsd(g.cost)}</span>
+              <span className="usage-n muted">{fmt(g.prompt)} / {fmt(g.completion)}</span>
+              <span className="usage-n muted">{g.requests}</span>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 
@@ -120,7 +129,7 @@ export function UsageModal({ onClose, projects = [], chats = [] }) {
           </Select>
         </Field>
       </div>
-      {rows === null ? <div className="muted">Loading…</div> : (
+      {rows === null ? <div className="skeleton-rows" role="status" aria-label="Loading"><i /><i /><i /></div> : (
         <>
           <div className="usage-cards">
             <div><span className="muted small">Total tokens</span><b>{fmt(total.p + total.c)}</b></div>
@@ -171,7 +180,7 @@ export function MemoryModal({ memory, enabled, onChange, onToggle, onClose }) {
         {memory.map((m) => (
           <div key={m.id} className="mem-item">
             <input value={m.text} onChange={(e) => onChange(memory.map((x) => (x.id === m.id ? { ...x, text: e.target.value } : x)))} />
-            <button title="Delete" onClick={() => onChange(memory.filter((x) => x.id !== m.id))}><Icon name="x" size={14} /></button>
+            <button title="Delete" aria-label="Delete" onClick={() => onChange(memory.filter((x) => x.id !== m.id))}><Icon name="x" size={14} /></button>
           </div>
         ))}
       </div>
@@ -259,66 +268,6 @@ export function FilePreviewModal({ file, onClose }) {
   );
 }
 
-export function PhoneSettings({ s, set, setS }) {
-  const [st, setSt] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = () => window.api.remoteStatus().then((r) => alive && setSt(r)).catch(() => {});
-    tick(); const t = setInterval(tick, 2000);
-    return () => { alive = false; clearInterval(t); };
-  }, []);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState(null);
-  const pick = async () => { const f = await window.api.pickFolder(); if (f) setS({ ...s, remoteFolder: f }); };
-  const connect = async () => {
-    setBusy(true); setNote(null);
-    try {
-      const r = await window.api.remoteConnectTelegram(s.telegramToken || '');
-      if (r.status) setSt({ ...(st || {}), telegram: r.status });
-      window.api.remoteStatus().then(setSt).catch(() => {});
-      if (!r.ok) return setNote({ bad: true, text: r.error });
-      setS((x) => ({ ...x, telegramEnabled: true, telegramToken: '', hasTelegramToken: true }));
-      setNote({ text: r.paired ? (r.testMessageSent ? `Connected to @${r.botName}. A test message was sent to your Telegram.` : `Connected to @${r.botName}.`) : `Connected to @${r.botName}. Now open it in Telegram, press Start and send: /pair ${r.pairCode}` });
-    } finally { setBusy(false); }
-  };
-  return (
-    <fieldset className="group">
-      <legend>Phone</legend>
-      <label className="check"><input type="checkbox" checked={!!s.telegramEnabled} onChange={set('telegramEnabled')} /> <span>Telegram bot<br /><small>Chat with the assistant from Telegram, send it photos/files, and let it send files to you.</small></span></label>
-      {s.telegramEnabled && (
-        <>
-          <Field label="Bot token" hint={s.hasTelegramToken ? 'A token is saved. Paste a new one to replace it. Create a bot with @BotFather.' : 'Create a bot with @BotFather and paste its token.'}>
-            <div className="link-row">
-              <input type="password" autoComplete="off" placeholder="123456789:AAH…" value={s.telegramToken || ''} onChange={set('telegramToken')} />
-              <button className="primary" onClick={connect} disabled={busy || (!s.telegramToken && !s.hasTelegramToken)}>{busy ? 'Connecting…' : 'Connect & test'}</button>
-            </div>
-          </Field>
-          {note && <small className={`hint ${note.bad ? 'err' : 'ok'}`}>{note.text}</small>}
-          <small className={`hint ${st?.telegram?.error ? 'err' : ''}`}>
-            {!st ? 'Checking…'
-              : st.telegram.retrying ? `${st.telegram.error || 'Cannot reach Telegram.'} Retrying every few seconds…`
-              : st.telegram.error ? `Telegram error: ${st.telegram.error}`
-              : !st.telegram.hasToken ? 'No token saved yet. Paste it above and press Connect & test.'
-              : !st.telegram.running ? 'Not connected yet. Press Connect & test.'
-              : !st.telegram.paired ? <>Bot @{st.telegram.botName} is online. In Telegram, open it, press Start and send: <b>/pair {st.telegram.pairCode}</b></>
-              : <>Connected to @{st.telegram.botName}{st.telegram.openChat ? ` · chat open: ${st.telegram.openChat}` : ''}. <a href="#" onClick={(e) => { e.preventDefault(); window.api.remoteUnpair().then(setSt); }}>Unpair</a></>}
-          </small>
-          {st?.telegram?.paired && <small className="hint">From Telegram: /chats opens a desktop chat and continues it there (new messages show up in the app), /search finds old chats, /skills lists skills.</small>}
-        </>
-      )}
-      {s.telegramEnabled && (
-        <>
-          <Field label="Project folder for phone chats" hint="Files the assistant can read and write when you chat from your phone. Leave empty for none.">
-            <div className="link-row"><input value={s.remoteFolder || ''} onChange={set('remoteFolder')} placeholder="/path/to/folder" /><button onClick={pick}>Choose…</button></div>
-          </Field>
-          <label className="check"><input type="checkbox" checked={s.remoteContinueLast !== false} onChange={set('remoteContinueLast')} /> <span>Continue my most recent desktop chat<br /><small>A message from your phone goes into the chat you used last on the desktop (within 12 hours) instead of opening a new one. /new starts a fresh chat, /open picks another.</small></span></label>
-          <label className="check"><input type="checkbox" checked={!!s.remoteAllowDangerous} onChange={set('remoteAllowDangerous')} /> <span>Full control from the phone (terminal + screen, mouse, keyboard)<br /><small>On: you can drive your computer from Telegram and see live screenshots; send /screen for a snapshot. Anyone who gets into your paired Telegram account could do the same. Each task still asks you to approve on the phone.</small></span></label>
-        </>
-      )}
-    </fieldset>
-  );
-}
-
 // ---------- Connectors (MCP) ----------
 const splitArgs = (str) => {
   const out = []; const re = /"([^"]*)"|'([^']*)'|(\S+)/g; let m;
@@ -341,7 +290,41 @@ const PRESETS = [
   { label: 'Fetch', name: 'Fetch', type: 'stdio', command: 'uvx', args: 'mcp-server-fetch' }
 ];
 
-export function ConnectorsModal({ onClose, onChanged }) {
+const FULL_ACCESS_KEYS = ['toolsEnabled', 'shellEnabled', 'computerEnabled', 'webEnabled', 'notesAi', 'memoryEnabled', 'connectorsEnabled', 'skillsEnabled', 'delegateEnabled', 'browserTools'];
+
+/** Artemis's own tools, listed like a connector, with one switch that gives them full access. */
+function ArtemisBuiltin({ settings, onApply }) {
+  const [tools, setTools] = useState([]);
+  const [show, setShow] = useState(false);
+  useEffect(() => { window.api.artemisTools().then(setTools).catch(() => {}); }, []);
+  const s = settings || {};
+  const full = FULL_ACCESS_KEYS.every((k) => s[k] !== false && !!s[k]) && !!s.autoApproveEdits;
+  const toggle = () => onApply?.(full ? { autoApproveEdits: false } : { ...Object.fromEntries(FULL_ACCESS_KEYS.map((k) => [k, true])), autoApproveEdits: true });
+  return (
+    <div className="conn connected">
+      <Icon name="check" size={16} className="conn-state" />
+      <div className="conn-main">
+        <div className="conn-name">Artemis <span className="muted small">built-in</span></div>
+        <div className="muted small conn-sub">
+          {tools.length} tool{tools.length === 1 ? '' : 's'}{show ? '' : ': ' + tools.slice(0, 6).map((t) => t.name).join(', ') + (tools.length > 6 ? '…' : '')}
+          {tools.length > 0 && <> · <a href="#" onClick={(e) => { e.preventDefault(); setShow(!show); }}>{show ? 'Hide tools' : 'Show all tools'}</a></>}
+        </div>
+        <div className="muted small conn-sub">Full access: every Artemis tool (files, terminal, computer control, web, notes, memory, connectors) is on and runs without asking. Deleting files still asks. Turn it off to go back to "ask every time".</div>
+        {show && (
+          <div className="conn-tools">
+            {tools.map((t) => (
+              <div key={t.name} className="conn-tool"><code>{t.name}</code>{t.description ? <span className="muted small">{t.description}</span> : null}</div>
+            ))}
+          </div>
+        )}
+      </div>
+      <span className="muted small">Full access</span>
+      <label className="switch" title="Full access"><input type="checkbox" checked={full} onChange={toggle} /></label>
+    </div>
+  );
+}
+
+export function ConnectorsModal({ onClose, onChanged, settings, onApply }) {
   const [list, setList] = useState([]);
   const [status, setStatus] = useState([]);
   const [form, setForm] = useState(null); // editing/adding
@@ -419,6 +402,7 @@ export function ConnectorsModal({ onClose, onChanged }) {
   return (
     <Modal title="Connectors" onClose={onClose} wide>
       <p className="muted small">Connect MCP servers so the assistant can use their tools (databases, GitHub, Notion, browsers, files…). Each connector asks for approval once per task, unless its tool is read-only.</p>
+      <ArtemisBuiltin settings={settings} onApply={onApply} />
       {list.length === 0 && !f && <div className="empty-card small-card"><Icon name="plug" size={24} /><span>No connectors yet.</span></div>}
       {list.map((c) => {
         const st = stOf(c.id);
@@ -445,8 +429,8 @@ export function ConnectorsModal({ onClose, onChanged }) {
               )}
             </div>
             <label className="switch" title="Enable"><input type="checkbox" checked={c.enabled !== false} onChange={() => persist(list.map((x) => (x.id === c.id ? { ...x, enabled: !(x.enabled !== false) } : x)))} /></label>
-            <button className="icon-btn" title="Edit" onClick={() => edit(c)}><Icon name="pencil" size={15} /></button>
-            <button className="icon-btn" title="Remove" onClick={() => askConfirm({ title: 'Remove connector', message: `Remove "${c.name}"?`, confirmLabel: 'Remove', danger: true }).then((ok) => ok && persist(list.filter((x) => x.id !== c.id)))}><Icon name="trash" size={15} /></button>
+            <button className="icon-btn" title="Edit" aria-label="Edit" onClick={() => edit(c)}><Icon name="pencil" size={15} /></button>
+            <button className="icon-btn" title="Remove" aria-label="Remove" onClick={() => askConfirm({ title: 'Remove connector', message: `Remove "${c.name}"?`, confirmLabel: 'Remove', danger: true }).then((ok) => ok && persist(list.filter((x) => x.id !== c.id)))}><Icon name="trash" size={15} /></button>
           </div>
         );
       })}
@@ -570,7 +554,7 @@ export function ProfileModal({ settings, avatar, onAvatar, onSave, onClose }) {
         </div>
       </div>
       <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="How Artemis should address you" /></Field>
-      <Field label="Where you are" hint="City and country, e.g. Baku, Azerbaijan. Artemis uses it for “near me” questions without asking. Leave empty and it can look up your approximate location from your IP address instead (it asks first).">
+      <Field label="Where you are" hint="City and country. Artemis uses it for “near me” questions without asking. Leave empty and it can look up your approximate location from your IP address instead (it asks first).">
         <input value={place} onChange={(e) => setPlace(e.target.value)} placeholder="City, country" />
       </Field>
       <Field label="About you">

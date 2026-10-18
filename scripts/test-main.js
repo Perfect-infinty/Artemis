@@ -53,6 +53,7 @@ try { require(path.join(__dirname, '..', 'electron', 'main.js')); } catch (e) { 
   const raw = JSON.parse(fs.readFileSync(path.join(userData, 'settings.json'), 'utf8'));
   assert(!JSON.stringify(raw).includes('TOKEN-1'), 'token must be encrypted at rest');
   assert(registered['CommandOrControl+Shift+Space'], 'quick chat shortcut is registered');
+  assert(registered['CommandOrControl+Shift+A'], 'Sentinel on/off shortcut is registered');
   // every channel the renderer can invoke must have a handler in main (guards against lost handlers when main.js is split up)
   const pre = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.js'), 'utf8');
   const wanted = [...new Set([...pre.matchAll(/invoke\('([a-zA-Z]+:[a-zA-Z]+)'/g)].map((m) => m[1]))];

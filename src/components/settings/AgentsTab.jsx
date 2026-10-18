@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { askConfirm } from '../../lib/dialog.js';
 import ModelPicker from '../ModelPicker.jsx';
+import { Icon } from '../Icons.jsx';
+import { Group, Row, SwitchRow, Note, Buttons } from './ui.jsx';
 
 export const AGENT_BLANK = { name: '', role: '', description: '', model: '', tools: ['read'], body: '', isNew: true };
 
-export function AgentsTab({ s, set, chatGroups, showToggles = true }) {
+export function AgentsTab({ s, set, setS, chatGroups, showToggles = true }) {
+  const put = (k) => (v) => (setS ? setS((x) => ({ ...x, [k]: v })) : set(k)({ target: { type: 'checkbox', checked: v } }));
   const api = window.api;
   const [list, setList] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -28,43 +31,52 @@ export function AgentsTab({ s, set, chatGroups, showToggles = true }) {
     const toggle = (g) => setEd({ ...ed, tools: ed.tools.includes(g) ? ed.tools.filter((x) => x !== g) : [...ed.tools, g] });
     return (
       <>
-        <label className="field"><span>Name</span><input value={ed.name} disabled={!ed.isNew} onChange={(e) => setEd({ ...ed, name: e.target.value })} placeholder="Athena" /></label>
-        <label className="field"><span>Role</span><input value={ed.role || ''} onChange={(e) => setEd({ ...ed, role: e.target.value })} placeholder="Researcher" /><small>Optional title. You can ask for the agent by name or by role.</small></label>
-        <label className="field"><span>What is it for?</span><input value={ed.description} onChange={(e) => setEd({ ...ed, description: e.target.value })} placeholder="Finds and checks facts on the web" /><small>One line. Artemis reads this to decide when to hand work to this agent.</small></label>
-        <div className="field"><span>Model</span>
-          <ModelPicker value={ed.model} groups={chatGroups} onChange={(m) => setEd({ ...ed, model: m })} emptyLabel="Same as chat" up={false} align="left" className="wide" />
-          <small>Put cheap jobs (search, summaries) on a cheap model and hard jobs on a strong one. This is what cuts the cost.</small>
-        </div>
-        <div><div className="muted small" style={{ margin: '12px 0 4px' }}>Tools</div>
-          {groups.map((g) => <label key={g.id} className="check"><input type="checkbox" checked={ed.tools.includes(g.id)} onChange={() => toggle(g.id)} /> <span>{g.label}</span></label>)}
-        </div>
-        <label className="field"><span>Instructions</span><textarea rows={9} value={ed.body} onChange={(e) => setEd({ ...ed, body: e.target.value })} spellCheck={false} style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12.5 }} /></label>
-        {err && <small className="hint err">{err}</small>}
-        <div className="actions-row"><span style={{ flex: 1 }} /><button onClick={() => setEd(null)}>Cancel</button><button className="primary" onClick={save}>Save agent</button></div>
+        <Group title={ed.isNew ? 'New agent' : ed.name}>
+          <Row label="Name"><input value={ed.name} disabled={!ed.isNew} onChange={(e) => setEd({ ...ed, name: e.target.value })} placeholder="Athena" /></Row>
+          <Row label="Role" description="Optional title. You can ask for the agent by name or by role."><input value={ed.role || ''} onChange={(e) => setEd({ ...ed, role: e.target.value })} placeholder="Researcher" /></Row>
+          <Row stacked label="What is it for?" description="One line. Artemis reads this to decide when to hand work to this agent."><input value={ed.description} onChange={(e) => setEd({ ...ed, description: e.target.value })} placeholder="Finds and checks facts on the web" /></Row>
+          <Row label="Model" description="Put cheap jobs (search, summaries) on a cheap model and hard jobs on a strong one. This is what cuts the cost.">
+            <ModelPicker value={ed.model} groups={chatGroups} onChange={(m) => setEd({ ...ed, model: m })} emptyLabel="Same as chat" up={false} align="right" />
+          </Row>
+        </Group>
+        <Group title="Tools">
+          {groups.map((g) => <SwitchRow key={g.id} label={g.label} checked={ed.tools.includes(g.id)} onChange={() => toggle(g.id)} />)}
+        </Group>
+        <Group title="Instructions">
+          <Row stacked><textarea rows={9} className="mono" aria-label="Instructions" value={ed.body} onChange={(e) => setEd({ ...ed, body: e.target.value })} spellCheck={false} /></Row>
+        </Group>
+        {err && <Note tone="err">{err}</Note>}
+        <Buttons end><button type="button" className="pref-btn" onClick={() => setEd(null)}>Cancel</button><button type="button" className="pref-btn primary" onClick={save}>Save agent</button></Buttons>
       </>
     );
   }
   return (
     <>
-      {showToggles && (<>
-      <label className="check"><input type="checkbox" checked={s.delegateEnabled !== false} onChange={set('delegateEnabled')} /> <span>Let Artemis use agents<br /><small>Artemis plans the work, hands parts to the agents below (up to 4 at once, one level deep) and merges the results. Add "use the Reviewer" to a request to have the output checked.</small></span></label>
-      <label className="check"><input type="checkbox" checked={s.agentWriteApproval !== false} onChange={set('agentWriteApproval')} /> <span>Ask before agents write files<br /><small>On: every write by an agent asks you in the chat ("Coder agent wants to..."). Off: agents write without asking when edits are auto-allowed. Deleting is never available to agents.</small></span></label>
-      </>)}
-      <div className="agent-rows">
+      {showToggles && (
+        <Group>
+          <SwitchRow label="Let Artemis use agents" description={'Artemis plans the work, hands parts to the agents below (up to 4 at once, one level deep) and merges the results. Add "use the Reviewer" to a request to have the output checked.'}
+            checked={s.delegateEnabled !== false} onChange={put('delegateEnabled')} />
+          <SwitchRow label="Ask before agents write files" description={'On: every write by an agent asks you in the chat ("Coder agent wants to..."). Off: agents write without asking when edits are auto-allowed. Deleting is never available to agents.'}
+            checked={s.agentWriteApproval !== false} onChange={put('agentWriteApproval')} />
+        </Group>
+      )}
+      <Group title="Agents" footer={<>Agents are plain .md files (name, description, model, tools, then instructions), like skills. Per-project agents go in &lt;project&gt;/.artemis/agents/.</>}>
         {list.map((a) => (
-          <div key={a.slug + a.source} className="agent-row">
-            <div className="agent-row-main">
-              <b>{a.name}</b>{a.role ? <span className="muted"> · {a.role}</span> : null} <small className="muted">{a.builtin ? 'built-in' : a.overrides ? 'edited' : a.source}</small>
-              <div className="muted">{a.description}</div>
-              <div className="agent-chips"><span>{modelLabel(a.model)}</span>{a.tools.map((t) => <span key={t}>{t}</span>)}</div>
+          <Row key={a.slug + a.source} label={<>{a.name}{a.role ? <span className="pref-dim"> · {a.role}</span> : null} <span className="pref-tag">{a.builtin ? 'built-in' : a.overrides ? 'edited' : a.source}</span></>}
+            description={<>{a.description}<span className="agent-chips"><span>{modelLabel(a.model)}</span>{a.tools.map((t) => <span key={t}>{t}</span>)}</span></>}>
+            <div className="pref-inline">
+              <button type="button" className="pref-btn" onClick={() => setEd({ ...a })} aria-label={'Edit ' + a.name}>Edit…</button>
+              {!a.builtin && <button type="button" className="pref-btn" onClick={() => remove(a)}>{a.overrides ? 'Reset' : 'Delete'}</button>}
             </div>
-            <button onClick={() => setEd({ ...a })}>Edit</button>
-            {!a.builtin && <button onClick={() => remove(a)}>{a.overrides ? 'Reset' : 'Delete'}</button>}
-          </div>
+          </Row>
         ))}
-      </div>
-      <div className="actions-row"><button onClick={() => setEd({ ...AGENT_BLANK })}>+ New agent</button><button onClick={() => api.agentsReveal()}>Open agents folder</button></div>
-      <small className="hint">Agents are plain .md files (name, description, model, tools, then instructions), like skills. Per-project agents go in &lt;project&gt;/.artemis/agents/.</small>
+        <Row>
+          <div className="pref-inline">
+            <button type="button" className="pref-btn" onClick={() => setEd({ ...AGENT_BLANK })}><Icon name="plus" size={13} /> New agent…</button>
+            <button type="button" className="pref-btn" onClick={() => api.agentsReveal()}>Open agents folder</button>
+          </div>
+        </Row>
+      </Group>
     </>
   );
 }

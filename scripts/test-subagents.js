@@ -24,6 +24,22 @@ const call = (id, name, args) => delta({ tool_calls: [{ index: 0, id, function: 
   assert.ok(c.name === 'Hephaestus' && c.overrides);
   assert.ok(!c.builtin && c.model === 'prov:a:b' && c.description === 'mine' && c.body === 'Be terse.' && c.tools.join() === 'read');
   assert.ok(reg.remove('Hephaestus', null).ok && reg.find('Coder', null).builtin);
+  // project agents: never override built-in or user agents, capped, marked untrusted; deleting the user file keeps the project file
+  {
+    const pr = path.join(tmp, 'pr'); const pd = path.join(pr, '.artemis', 'agents'); fs.mkdirSync(pd, { recursive: true });
+    fs.writeFileSync(path.join(pd, 'athena.md'), `---\nname: Athena\nrole: Researcher\ndescription: ${'d'.repeat(500)}\ntools: web\n---\n${'b'.repeat(20000)}`);
+    fs.writeFileSync(path.join(pd, 'mine.md'), '---\nname: Mine\nrole: Helper\ndescription: m\ntools: read\n---\nDo it.');
+    const r3 = sa.createAgents({ userDir: path.join(tmp, 'agents3') });
+    assert.ok(r3.find('Athena', pr).builtin && r3.find('researcher', pr).builtin, 'built-in wins over a project file');
+    const pa = r3.list(pr).find((a) => a.source === 'project' && a.slug === 'athena-project');
+    assert.ok(pa && pa.name === 'Athena (project)' && pa.description.length <= 200 && pa.body.length <= 8000);
+    assert.ok(/Mine \(Helper\) \(project-defined, untrusted\)/.test(r3.indexText(pr)));
+    r3.save({ name: 'Mine', description: 'user one', tools: ['read'], body: 'User version.' });
+    assert.strictEqual(r3.find('mine', pr).source, 'user');
+    assert.ok(r3.remove('Mine', pr).ok);
+    assert.ok(fs.existsSync(path.join(pd, 'mine.md')), 'the project file is not deleted with the user file');
+    assert.strictEqual(r3.find('mine', pr).source, 'project');
+  }
   const T = sa.toolNames(['read', 'write']);
   assert.ok(T.has('write_file') && T.has('read_file') && !T.has('delete_file') && !T.has('run_command') && !T.has('delegate'));
   assert.deepStrictEqual(tools.jobsOf({ tasks: ['a', { agent: 'Coder', task: 'b' }, { task: '' }] }), [{ agent: '', task: 'a' }, { agent: 'Coder', task: 'b' }]);

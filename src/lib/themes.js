@@ -29,22 +29,48 @@ export function applyThemeVars() {
 }
 
 /** Paints the active theme (its --theme-* values go on the root); System follows the OS. */
+const CACHE = 'artemis.themeCache';
+
 export function applyTheme(id, themes = []) {
   const el = document.documentElement;
   clearVars(el);
   if (!id || id === SYSTEM_THEME.id || !isKnownTheme(id)) {
     delete el.dataset.theme;
+    delete el.dataset.scheme;
     el.style.colorScheme = '';
+    saveCache({ id: SYSTEM_THEME.id });
     return;
   }
   el.dataset.theme = id;
   const t = (themes || []).find((x) => x && x.id === id);
+  const vars = {};
   if (t && t.vars) {
     for (const [k, v] of Object.entries(t.vars)) {
-      if (typeof k === 'string' && k.startsWith('--theme-') && typeof v === 'string' && v) el.style.setProperty(k, v);
+      if (typeof k === 'string' && k.startsWith('--theme-') && typeof v === 'string' && v) { el.style.setProperty(k, v); vars[k] = v; }
     }
   }
-  el.style.colorScheme = t ? (t.dark === false ? 'light' : 'dark') : '';
+  const scheme = t ? (t.dark === false ? 'light' : 'dark') : '';
+  el.style.colorScheme = scheme;
+  if (scheme) el.dataset.scheme = scheme; else delete el.dataset.scheme; // lets CSS pick light or dark code colours for JSON themes
+  saveCache({ id, vars, scheme });
+}
+
+function saveCache(c) { try { localStorage.setItem(CACHE, JSON.stringify(c)); } catch {} }
+
+/** At boot, before React renders: paint the theme used last time, so the window does not flash the default palette while the themes load. */
+export function applyCachedTheme() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE) || 'null');
+    const size = localStorage.getItem('artemis.textSize');
+    if (size) applyTextSize(size, false);
+    if (!c || !c.id || c.id === SYSTEM_THEME.id) return;
+    const el = document.documentElement;
+    known.add(c.id);
+    el.dataset.vars = '1';
+    el.dataset.theme = c.id;
+    for (const [k, v] of Object.entries(c.vars || {})) if (k.startsWith('--theme-') && typeof v === 'string') el.style.setProperty(k, v);
+    if (c.scheme) { el.style.colorScheme = c.scheme; el.dataset.scheme = c.scheme; }
+  } catch {}
 }
 
 /** Loads the palettes from main; on failure the boot values in styles.css stay in place. */
@@ -59,7 +85,8 @@ export async function loadThemes(api, dir) {
   } catch { return []; }
 }
 
-export function applyTextSize(size) {
+export function applyTextSize(size, remember = true) {
   const found = TEXT_SIZES.find(([id]) => id === size) || TEXT_SIZES[1];
   document.documentElement.style.setProperty('--fs', found[2] + 'px');
+  if (remember) { try { localStorage.setItem('artemis.textSize', found[0]); } catch {} }
 }

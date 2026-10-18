@@ -47,7 +47,7 @@ function Editor({ job, projects, models, onSave, onClose }) {
           {r.type === 'once' && <label className="field"><span>Date</span><input type="date" min={today()} value={r.date} onChange={(e) => setR({ date: e.target.value })} /></label>}
           {r.type === 'monthly' && <label className="field"><span>Day of month</span><input type="number" min={1} max={31} value={r.dayOfMonth} onChange={(e) => setR({ dayOfMonth: e.target.value })} /></label>}
         </div>
-        {r.type === 'weekly' && <div className="day-pick">{DAYS.map((d, i) => <button key={i} type="button" title={DAY_NAMES[i]} className={r.days.includes(i) ? 'on' : ''} onClick={() => toggleDay(i)}>{d}</button>)}</div>}
+        {r.type === 'weekly' && <div className="day-pick">{DAYS.map((d, i) => <button key={i} type="button" title={DAY_NAMES[i]} aria-label={DAY_NAMES[i]} className={r.days.includes(i) ? 'on' : ''} onClick={() => toggleDay(i)}>{d}</button>)}</div>}
         <div className="sched-grid">
           <label className="field"><span>Project</span>
             <Select value={j.projectId || ''} onChange={(e) => setJ({ ...j, projectId: e.target.value })}>
@@ -56,7 +56,7 @@ function Editor({ job, projects, models, onSave, onClose }) {
           </label>
           <label className="field"><span>Model</span>
             <Select value={j.model} onChange={(e) => setJ({ ...j, model: e.target.value })}>
-              <option value="">Default model</option>
+              <option value="">Default (Settings → General)</option>
               {models.map((g) => <optgroup key={g.label} label={g.label}>{g.items.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</optgroup>)}
             </Select>
           </label>
@@ -99,9 +99,9 @@ export default function SchedulesView({ projects, models, onOpenChat }) {
                 <div className="sched-sub">{j.description}{pname(j.projectId) ? ` · ${pname(j.projectId)}` : ''}</div>
                 <div className="sched-sub">Next: {j.enabled ? when(j.nextRun) : 'paused'} · Last: {when(j.lastRun)}{j.runs ? ` · ${j.runs} run${j.runs === 1 ? '' : 's'}` : ''}</div>
               </div>
-              <button className="icon-btn" title="Run now" onClick={() => api.scheduleRun(j.id)} disabled={j.running}><Icon name="play" size={15} /></button>
-              <button className="icon-btn" title="Edit" onClick={() => setEdit({ ...blank(), ...j, repeat: { ...blank().repeat, ...j.repeat } })}><Icon name="pencil" size={15} /></button>
-              <button className="icon-btn" title="Delete" onClick={() => askConfirm({ title: 'Delete task', message: `Delete "${j.name}"?`, confirmLabel: 'Delete', danger: true }).then((ok) => ok && api.scheduleDelete(j.id).then(load))}><Icon name="trash" size={15} /></button>
+              <button className="icon-btn" title="Run now" aria-label="Run now" onClick={() => api.scheduleRun(j.id)} disabled={j.running}><Icon name="play" size={15} /></button>
+              <button className="icon-btn" title="Edit" aria-label="Edit" onClick={() => setEdit({ ...blank(), ...j, repeat: { ...blank().repeat, ...j.repeat } })}><Icon name="pencil" size={15} /></button>
+              <button className="icon-btn" title="Delete" aria-label="Delete" onClick={() => askConfirm({ title: 'Delete task', message: `Delete "${j.name}"?`, confirmLabel: 'Delete', danger: true }).then((ok) => ok && api.scheduleDelete(j.id).then(load))}><Icon name="trash" size={15} /></button>
               <label className="switch" title={j.enabled ? 'Pause' : 'Resume'}><input type="checkbox" checked={j.enabled} onChange={(e) => api.scheduleToggle(j.id, e.target.checked).then(load)} /><i /></label>
             </div>
           ))}

@@ -1,34 +1,157 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Select from './Select.jsx';
 import PERSONALITIES from '../../electron/personality.json';
 import { SYSTEM_THEME, TEXT_SIZES } from '../lib/themes.js';
-import { Modal, Field, ImportRow, PhoneSettings } from './Modals.jsx';
+import { ImportRow } from './Modals.jsx';
+import { Icon } from './Icons.jsx';
+import { Page, Group, Row, SwitchRow, Note } from './settings/ui.jsx';
+import { PhoneTab } from './settings/PhoneTab.jsx';
 import { ProvidersTab } from './settings/ProvidersTab.jsx';
 import { LimitsTab } from './settings/LimitsTab.jsx';
 import { AccessTab } from './settings/AccessTab.jsx';
+import { SecurityTab } from './settings/SecurityTab.jsx';
 import { VoiceTab } from './settings/VoiceTab.jsx';
 import { MakeTab } from './settings/MakeTab.jsx';
 import { AgentsTab } from './settings/AgentsTab.jsx';
 import { BrainsTab } from './settings/BrainsTab.jsx';
+import MemoryPanel from './MemoryPanel.jsx';
+import { eventToAccelerator, formatAccelerator, parseAccelerator } from '../lib/shortcuts.mjs';
 
-const TABS = [
-  ['general', 'General'],
-  ['providers', 'Providers'],
-  ['tools', 'Tools & safety'],
-  ['access', 'Access'],
-  ['agents', 'Agents'],
-  ['brains', 'Brains'],
-  ['limits', 'Usage limits'],
-  ['voice', 'Voice'],
-  ['make', 'Make'],
-  ['phone', 'Phone']
+const IS_MAC = window.api?.platform === 'darwin';
+
+/** A shortcut box, recorded like the push-to-talk key in Voice: click it, press the keys; Esc cancels, Clear turns it off. */
+function ShortcutField({ label, about, value, onChange, placeholder, error }) {
+  const v = String(value || '').trim();
+  const [rec, setRec] = useState(false);
+  const [msg, setMsg] = useState('');
+  const bad = !!v && !parseAccelerator(v);
+  const shown = formatAccelerator(v, IS_MAC);
+  const err = error || (bad ? `"${v}" is not a valid shortcut. Example: ${formatAccelerator(placeholder, IS_MAC) || placeholder}` : '');
+  const pause = (on) => { try { window.api.shortcutsPause && window.api.shortcutsPause(on); } catch {} };
+  useEffect(() => () => { if (rec) pause(false); }, [rec]); // give the global shortcuts back if Settings closes while recording
+  const onKeyDown = (e) => {
+    if (e.key === 'Tab') return;
+    e.preventDefault(); e.stopPropagation(); // the app's own shortcuts (the palette) must not fire while recording
+    if (e.key === 'Escape') { e.currentTarget.blur(); return; }
+    if (['Meta', 'Control', 'Alt', 'Shift'].includes(e.key)) { setMsg(''); return; } // wait for the main key
+    const a = eventToAccelerator(e, IS_MAC);
+    if (!a) { setMsg(IS_MAC ? 'Add ⌘, ⌥ or ⌃ (or use an F-key).' : 'Add Ctrl or Alt (or use an F-key).'); return; }
+    setMsg(''); onChange(a); e.currentTarget.blur();
+  };
+  const example = placeholder ? formatAccelerator(placeholder.replace(/^e\.g\.\s*/, ''), IS_MAC) : '';
+  return (
+    <Row label={label} description={<>{about}{example && !shown ? <> For example <kbd>{example}</kbd>.</> : null}</>} error={err || msg}>
+      <div className="pref-inline">
+        <input readOnly className={`pref-shortcut ${rec ? 'recording' : ''} ${shown ? '' : 'empty'}`} value={rec ? 'Press the keys…' : (shown || '')} placeholder="Click to record"
+          title="Click, then press the keys. Esc cancels." aria-invalid={!!err} aria-label={label + ' shortcut'}
+          onFocus={() => { setRec(true); setMsg(''); pause(true); }} onBlur={() => { setRec(false); pause(false); }} onKeyDown={onKeyDown} />
+        <button type="button" className="pref-btn" onClick={() => { onChange(''); setMsg(''); }} disabled={!v} aria-label={'Clear ' + label + ' shortcut'}>Clear</button>
+      </div>
+    </Row>
+  );
+}
+
+// id, sidebar label, icon, one-line description
+export const SECTIONS = [
+  ['general', 'General', 'sliders', 'Default model, personality and how Artemis starts.'],
+  ['appearance', 'Appearance', 'eye', 'Theme, text size and how the model’s reasoning shows.'],
+  ['shortcuts', 'Keyboard shortcuts', 'keyboard', 'Shortcuts that work from any app, and inside Artemis.'],
+  ['providers', 'Providers', 'plug', 'Model providers, endpoints and API keys.'],
+  ['tools', 'Tools & safety', 'wrench', 'What the assistant may do, and when it asks first.'],
+  ['access', 'Access', 'shield', 'macOS permissions, folders and features Artemis can reach.'],
+  ['security', 'Security', 'lock', 'App lock, Touch ID, voice recognition and what happens on unauthorized access.'],
+  ['agents', 'Agents', 'layers', 'Helper agents Artemis can hand parts of a task to.'],
+  ['brains', 'Brains', 'bulb', 'Personalities with their own model, and the council that picks one.'],
+  ['limits', 'Usage limits', 'chart', 'Spending and token limits, and the length of one answer.'],
+  ['voice', 'Voice', 'mic', 'Dictation, reading answers aloud and Sentinel voice mode.'],
+  ['make', 'Make', 'bolt', 'Let Artemis use your Make.com scenarios.'],
+  ['phone', 'Phone', 'phone', 'Chat with Artemis from Telegram.']
 ];
 
-export function SettingsModal({ settings, groups = [], projects = [], providers = [], onProviders = () => {}, onApply = () => {}, onSave, onClose, onNewTab, initialTab = 'general' }) {
-  const [tab, setTab] = useState(initialTab);
+// words people look for, so the search finds a setting by what it does and not only by its section name
+const KEYWORDS = {
+  general: 'language model default reasoning effort image video system prompt instructions personality tray background dock launch login startup import chatgpt claude export notes folder files memory use ram',
+  appearance: 'theme appearance dark light colors color text size font thinking reasoning display',
+  shortcuts: 'shortcut shortcuts keyboard hotkey keys palette command quick chat search sentinel global',
+  providers: 'api key keys openai anthropic claude gemini ollama openrouter model models endpoint base url provider',
+  tools: 'permissions approve approval auto allow safety safe terminal shell commands web search computer use browser connectors mcp files skills learning lazy tokens',
+  security: 'security lock password touch id fingerprint recovery code voice recognition speaker only my voice unauthorized access lockdown telegram alert photo camera idle sleep sensitive',
+  access: 'remote access network allow folders paths mcp server connectors permissions macos screen recording accessibility token port',
+  agents: 'agent agents subagent delegate helper',
+  brains: 'brain brains council persona personality',
+  limits: 'usage limit limits budget cost token tokens daily monthly usd spend spending max length answer',
+  voice: 'voice speech microphone mic speakers speak wake word sentinel transcribe tts dictation kokoro chatterbox piper push to talk',
+  make: 'make make.com scenarios automation token zone',
+  phone: 'phone telegram bot pair mobile send file remote'
+};
+
+// Settings that are not saved from here: secrets go through their own commit path, the rest is computed by main.
+const NOT_SAVED = new Set(['hasApiKey', 'hasMakeToken', 'hasTelegramToken', 'shortcutError', 'shortcutErrors', 'telegramToken', 'apiKey', 'apiKeyEnc', 'telegramTokenEnc', 'makeTokenEnc', 'mcpTokenEnc']);
+// Typed or dragged values: saved 400 ms after the last change instead of at once.
+const DEBOUNCED = new Set(['systemPrompt', 'personalityCustom', 'maxTokens', 'cbUrl', 'ttsUrl', 'ttsVoice', 'ttsVoiceEn', 'ttsVoices', 'voiceLangMap', 'cbVoice', 'voiceSttModel', 'ttsModel', 'remoteFolder', 'cbExaggeration', 'cbCfg', 'cbTemperature', 'cbSpeed']);
+const normalize = (k, v) => {
+  if (k === 'maxTokens') return Math.max(256, parseInt(v, 10) || 8192);
+  if (k === 'dailyTokenLimit' || k === 'monthlyTokenLimit') return Math.max(0, parseInt(v, 10) || 0);
+  if (k === 'dailyUsdLimit' || k === 'monthlyUsdLimit') return Math.max(0, parseFloat(v) || 0);
+  return v;
+};
+const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+/** What the page shows but main does not have yet. */
+export const pendingPatch = (s, base) => {
+  const out = {};
+  for (const k of Object.keys(s)) {
+    if (NOT_SAVED.has(k)) continue;
+    const v = normalize(k, s[k]);
+    if (!same(v, base[k])) out[k] = v;
+  }
+  return out;
+};
+const validTab = (t) => (SECTIONS.some(([id]) => id === t) ? t : 'general');
+
+export function SettingsModal({ settings, groups = [], projects = [], providers = [], onProviders = () => {}, onApply = async () => {}, onTabChange, initialTab = 'general' }) {
+  const [tab, setTabState] = useState(() => validTab(initialTab));
+  useEffect(() => { setTabState(validTab(initialTab)); }, [initialTab]);
+  const setTab = (t) => { setTabState(t); if (onTabChange) onTabChange(t); };
+  const [tq, setTq] = useState('');
   const [s, setS] = useState({ ...settings });
-  const set = (k) => (e) => setS({ ...s, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const set = (k) => (e) => setS((x) => ({ ...x, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }));
+  const put = (k) => (v) => setS((x) => ({ ...x, [k]: v }));
   const chatGroups = groups;
+
+  // ---- auto-save: every change goes to main at once (typed text after a short pause); nothing waits for a Save button ----
+  const baseRef = useRef(settings);
+  const sRef = useRef(s); sRef.current = s;
+  const applyRef = useRef(onApply); applyRef.current = onApply;
+  const timer = useRef(null);
+  const [status, setStatus] = useState(''); // '' | 'saved' | 'error'
+  const flush = async () => {
+    clearTimeout(timer.current); timer.current = null;
+    const patch = pendingPatch(sRef.current, baseRef.current || {});
+    if (!Object.keys(patch).length) return;
+    try { await applyRef.current(patch); setStatus('saved'); } catch (e) { console.error('Saving settings failed', e); setStatus('error'); }
+  };
+  useEffect(() => { // settings changed in main (our own save, Sentinel, the MCP server …): take over what the page has not changed itself
+    const prev = baseRef.current || {};
+    baseRef.current = settings;
+    setS((cur) => {
+      let n = null;
+      for (const k of Object.keys(settings)) {
+        if (same(settings[k], prev[k])) continue;
+        if (NOT_SAVED.has(k) || same(normalize(k, cur[k]), prev[k])) { n = n || { ...cur }; n[k] = settings[k]; }
+      }
+      return n || cur;
+    });
+  }, [settings]);
+  useEffect(() => {
+    const keys = Object.keys(pendingPatch(s, baseRef.current || {}));
+    if (!keys.length) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(flush, keys.some((k) => DEBOUNCED.has(k)) ? 400 : 0);
+  }, [s]);
+  useEffect(() => () => { if (timer.current) flush(); }, []); // closing the tab saves what is still waiting
+  useEffect(() => { if (status !== 'saved') return undefined; const t = setTimeout(() => setStatus(''), 1600); return () => clearTimeout(t); }, [status]);
+  const saveSecret = async (patch) => { try { await applyRef.current(patch); setStatus('saved'); } catch (e) { console.error('Saving settings failed', e); setStatus('error'); } };
+
   // Themes come from main: built-in JSON plus <userData>/themes and <project>/.artemis/themes, refreshed here.
   const projectFolder = (projects.find((p) => p.id === (settings.activeProjectId || (settings.projectId || ''))) || {}).folder || (projects[0] || {}).folder || '';
   const [themeInfo, setThemeInfo] = useState({ themes: [], folder: '' });
@@ -36,149 +159,254 @@ export function SettingsModal({ settings, groups = [], projects = [], providers 
   const [themeBusy, setThemeBusy] = useState(false);
   const refreshThemes = async () => {
     try {
-      const r = await api.themesList(projectFolder);
+      const r = await window.api.themesList(projectFolder);
       if (r) setThemeInfo({ themes: r.themes || [], folder: (r.folders && r.folders.user) || '' });
     } catch {}
   };
   const importThemes = async () => {
     setThemeBusy(true);
     try {
-      const r = await api.themesImport('');
+      const r = await window.api.themesImport('');
       if (r) setThemeMsg(r.added ? `Imported: ${r.added.join(', ')}` : '');
-      await refreshThemes(); onApply({});
+      await refreshThemes(); await onApply({});
     } catch (e) { setThemeMsg(String((e && e.message) || e)); }
     setThemeBusy(false);
   };
   useEffect(() => { refreshThemes(); }, []);
-  useEffect(() => api.onThemeChanged ? api.onThemeChanged(() => refreshThemes()) : undefined, []);
+  useEffect(() => window.api.onThemeChanged ? window.api.onThemeChanged(() => refreshThemes()) : undefined, []);
   const themeList = [SYSTEM_THEME, ...themeInfo.themes];
   const mediaGroups = providers.filter((p) => p.enabled !== false && (p.models || []).length).map((p) => <optgroup key={p.id} label={p.name}>{p.models.map((m) => <option key={m.id} value={`prov:${p.id}:${m.id}`}>{m.name || m.id}</option>)}</optgroup>);
   const known = !s.model || chatGroups.some((g) => g.items.some(([id]) => id === s.model));
-  const save = () => onSave({
-    ...s,
-    telegramToken: s.telegramToken ? s.telegramToken.trim() : undefined,
-    maxTokens: Math.max(256, parseInt(s.maxTokens, 10) || 8192),
-    dailyTokenLimit: Math.max(0, parseInt(s.dailyTokenLimit, 10) || 0),
-    monthlyTokenLimit: Math.max(0, parseInt(s.monthlyTokenLimit, 10) || 0),
-    dailyUsdLimit: Math.max(0, parseFloat(s.dailyUsdLimit) || 0),
-    monthlyUsdLimit: Math.max(0, parseFloat(s.monthlyUsdLimit) || 0)
+  const modelOptions = chatGroups.map((g) => <optgroup key={g.label} label={g.label}>{g.items.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</optgroup>);
+
+  // ---- sidebar: search filters the sections; rows in the open section that match are highlighted ----
+  const terms = tq.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = terms.length ? SECTIONS.filter(([id, label]) => { const hay = (label + ' ' + (KEYWORDS[id] || '')).toLowerCase(); return terms.every((t) => hay.includes(t)); }) : SECTIONS;
+  const contentRef = useRef(null);
+  const navRef = useRef(null);
+  useEffect(() => { if (terms.length && shown.length && !shown.some(([id]) => id === tab)) setTab(shown[0][0]); }, [tq]);
+  useEffect(() => { // highlight matching rows; runs after every render because a section loads its rows asynchronously
+    const root = contentRef.current; if (!root) return;
+    let first = null;
+    root.querySelectorAll('.pref-row').forEach((el) => {
+      const hit = terms.length > 0 && terms.every((t) => (el.textContent || '').toLowerCase().includes(t));
+      el.classList.toggle('match', hit);
+      if (hit && !first) first = el;
+    });
+    if (first && root.dataset.q !== tq + '|' + tab) { root.dataset.q = tq + '|' + tab; first.scrollIntoView({ block: 'nearest' }); }
   });
+  useEffect(() => { if (contentRef.current) contentRef.current.scrollTop = 0; }, [tab]);
+  const onNavKey = (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const i = shown.findIndex(([id]) => id === tab);
+    const next = shown[(i + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length];
+    if (!next) return;
+    setTab(next[0]);
+    requestAnimationFrame(() => navRef.current?.querySelector(`[data-sec="${next[0]}"]`)?.focus());
+  };
+  const sec = SECTIONS.find(([id]) => id === tab) || SECTIONS[0];
+  const statusEl = (
+    <span className={`pref-status ${status}`} role="status" aria-live="polite">
+      {status === 'saved' ? <><Icon name="check" size={13} /> Saved</> : status === 'error' ? 'Could not save. Try again.' : ''}
+    </span>
+  );
+
   return (
-    <Modal onClose={onClose} cls="settings" bare>
-      <div className="settings-nav">
-        <h2>Settings</h2>
-        {TABS.map(([id, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}
-        {onNewTab && <button className="nav-newtab" title="Move Settings into its own tab" onClick={() => onNewTab(tab)}>Open in new tab ↗</button>}
-      </div>
-      <div className="settings-main">
-        <div className="settings-body">
-          <h3>{TABS.find(([id]) => id === tab)[1]}</h3>
+    <div className="prefs">
+      <nav className="prefs-side" aria-label="Settings sections">
+        <div className="prefs-search">
+          <Icon name="search" size={13} />
+          <input type="search" placeholder="Search" aria-label="Search settings" value={tq} spellCheck={false} onChange={(e) => setTq(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && shown[0]) { setTab(shown[0][0]); } else if (e.key === 'Escape') { e.stopPropagation(); setTq(''); } else if (e.key === 'ArrowDown') { e.preventDefault(); navRef.current?.querySelector('[data-sec]')?.focus(); } }} />
+        </div>
+        <div className="prefs-nav" ref={navRef} onKeyDown={onNavKey}>
+          {shown.map(([id, label, icon]) => (
+            <button key={id} type="button" data-sec={id} className={`prefs-nav-item ${tab === id ? 'active' : ''} ${terms.length ? 'match' : ''}`} aria-current={tab === id ? 'page' : undefined}
+              tabIndex={tab === id || !shown.some(([x]) => x === tab) ? 0 : -1} onClick={() => setTab(id)}>
+              <span className={`prefs-nav-icon ic-${id}`}><Icon name={icon} size={14} /></span>
+              <span className="prefs-nav-label">{label}</span>
+            </button>
+          ))}
+          {terms.length > 0 && !shown.length && <div className="prefs-none">No settings match “{tq.trim()}”.</div>}
+        </div>
+      </nav>
+      <main className="prefs-content" ref={contentRef}>
+        <Page title={sec[1]} description={sec[3]} aside={statusEl}>
           {tab === 'general' && (
             <>
-              <div className="field"><span>Theme</span>
-                <div className="theme-grid">
-                  {themeList.map((t) => (
-                    <button key={t.id} type="button" className={`theme-sw ${s.theme === t.id ? 'on' : ''}`} onClick={() => { setS({ ...s, theme: t.id }); onApply({ theme: t.id }); }} title={t.source === 'builtin' ? t.name : `${t.name} (${t.source})`}>
-                      <i style={{ background: t.id === 'system' ? `linear-gradient(135deg, ${t.preview[0]} 50%, ${t.preview[2]} 50%)` : t.preview[0] }}><b style={{ background: t.preview[1] }} /><b style={{ background: t.preview[2] }} /></i>
-                      <span>{t.name}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="row" style={{ alignItems: 'center', marginTop: 8 }}>
-                  <button type="button" onClick={refreshThemes} disabled={themeBusy}>{themeBusy ? 'Refreshing…' : 'Refresh'}</button>
-                  <button type="button" onClick={() => api.themesOpen('user').then(refreshThemes).catch(() => {})}>Open folder</button>
-                  <button type="button" onClick={importThemes} disabled={themeBusy}>Import .json</button>
-                  <span className="hint">{themeMsg || `${themeList.length} themes · ${themeInfo.folder || ''}`}</span>
-                </div>
-                <div className="hint">Drop a theme .json in that folder and press Refresh — no rebuild. A file is <code>{'{ "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. A project can also carry its own themes in .artemis/themes; those win over this folder.</div>
-              </div>
-              <Field label="Text size" hint="Size of the text across the whole app.">
-                <Select value={s.textSize || 'medium'} onChange={(e) => { setS({ ...s, textSize: e.target.value }); onApply({ textSize: e.target.value }); }}>{TEXT_SIZES.map(([id, n, px]) => <option key={id} value={id}>{n} ({px}px)</option>)}</Select>
-              </Field>
-              <Field label="Default model" hint="Used for new chats. Add more models in Providers.">
-                <Select value={s.model} onChange={set('model')}>
-                  {!s.model && <option value="">First model of the first provider</option>}
-                  {!known && <option value={s.model}>{s.model}</option>}
-                  {chatGroups.map((g) => <optgroup key={g.label} label={g.label}>{g.items.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</optgroup>)}
-                </Select>
-              </Field>
-              <Field label="Reasoning level" hint="How hard the model thinks before it answers: low is faster and cheaper, high thinks harder. Auto leaves it to the model. Used for new chats; change it per chat at the top. Models that do not support it ignore it.">
-                <Select value={s.reasoningEffort || 'auto'} onChange={(e) => setS({ ...s, reasoningEffort: e.target.value === 'auto' ? '' : e.target.value })}>
-                  <option value="auto">Auto</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </Select>
-              </Field>
-              <div className="row">
-                <Field label="Image model" hint="Needs a provider whose endpoint supports /images/generations. Off = no image generation.">
+              <Group title="Model">
+                <Row label="Default model" description="Used for new chats. Add more models in Providers.">
+                  <Select value={s.model} onChange={set('model')}>
+                    {!s.model && <option value="">First model of the first provider</option>}
+                    {!known && <option value={s.model}>{s.model}</option>}
+                    {modelOptions}
+                  </Select>
+                </Row>
+                <Row label="Reasoning level" description="How hard the model thinks before it answers: low is faster and cheaper, high thinks harder. Auto leaves it to the model. Used for new chats; change it per chat at the top. Models that do not support it ignore it.">
+                  <Select value={s.reasoningEffort || 'auto'} onChange={(e) => setS((x) => ({ ...x, reasoningEffort: e.target.value === 'auto' ? '' : e.target.value }))}>
+                    <option value="auto">Auto</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </Select>
+                </Row>
+                <Row label="Image model" description="Needs a provider whose endpoint supports /images/generations. Off = no image generation.">
                   <Select value={s.imageModel || ''} onChange={set('imageModel')}><option value="">Off</option>{mediaGroups}</Select>
-                </Field>
-                <Field label="Video model" hint="Needs a provider whose endpoint supports /videos/generations. Off = no video generation.">
+                </Row>
+                <Row label="Video model" description="Needs a provider whose endpoint supports /videos/generations. Off = no video generation.">
                   <Select value={s.videoModel || ''} onChange={set('videoModel')}><option value="">Off</option>{mediaGroups}</Select>
-                </Field>
-              </div>
-              <Field label="Personality" hint={(PERSONALITIES.find((p) => p.id === (s.personality || '')) || {}).hint || ''}>
-                <Select value={s.personality || ''} onChange={set('personality')}>
-                  {PERSONALITIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-                </Select>
-              </Field>
-              <Field label="Personality notes (optional)" hint="Your own words, e.g. “Talk like a sarcastic best friend”. Added to the preset above."><textarea rows={2} value={s.personalityCustom || ''} onChange={set('personalityCustom')} placeholder="How should Artemis talk to you?" /></Field>
-              <Field label="Custom instructions (system prompt)"><textarea rows={4} value={s.systemPrompt} onChange={set('systemPrompt')} placeholder="e.g. Keep answers short and direct." /></Field>
-              <Field label="Quick chat shortcut" hint={settings.shortcutError || 'Opens the floating chat from anywhere. Example: CommandOrControl+Shift+Space'}>
-                <input value={s.quickChatShortcut || ''} onChange={set('quickChatShortcut')} placeholder="CommandOrControl+Shift+Space" />
-              </Field>
-              <Field label="Command palette shortcut" hint="Opens Artemis and its command palette from any app, even when it is minimized. Leave empty to turn off. Example: CommandOrControl+K">
-                <input value={s.paletteShortcut || ''} onChange={set('paletteShortcut')} placeholder="CommandOrControl+K" />
-              </Field>
-              <label className="check"><input type="checkbox" checked={s.closeToTray !== false} onChange={set('closeToTray')} /> <span>Closing the window keeps Artemis running in the background<br /><small>Needed for the phone bot and scheduled tasks. Artemis stays in the Dock; quit it from the Artemis menu (Cmd+Q) or the menu bar icon.</small></span></label>
-              <label className="check"><input type="checkbox" checked={!!s.launchAtLogin} onChange={set('launchAtLogin')} /> Start Artemis when I log in</label>
-              <ImportRow />
+                </Row>
+              </Group>
+              <Group title="Scheduled tasks" footer="A task can still pick its own model in its editor. Scheduled tasks always run, whether Artemis is locked or not.">
+                <Row label="Model for scheduled tasks" description="A small, cheap model is usually enough for recurring tasks. Used by every task that has no model of its own.">
+                  <Select value={s.scheduleModel || ''} onChange={set('scheduleModel')}>
+                    <option value="">Same as the default model</option>
+                    {modelOptions}
+                  </Select>
+                </Row>
+              </Group>
+              <Group title="Chat titles">
+                <SwitchRow label="Automatic titles" description="Names each chat from its topic after the first reply, and again as the topic changes. A name you give a chat yourself is never changed. Not used for incognito, phone or scheduled chats."
+                  checked={s.autoTitles !== false} onChange={put('autoTitles')} />
+                {s.autoTitles !== false && (
+                  <Row label="Title model" description="A small, fast model is enough. The request sends only the first message, the start of the reply and, when re-titling, the last few messages (text only).">
+                    <Select value={s.titleModel || ''} onChange={set('titleModel')}>
+                      <option value="">Same as the chat</option>
+                      {modelOptions}
+                    </Select>
+                  </Row>
+                )}
+              </Group>
+              <Group title="Personality">
+                <Row label="Personality" description={(PERSONALITIES.find((p) => p.id === (s.personality || '')) || {}).hint || ''}>
+                  <Select value={s.personality || ''} onChange={set('personality')}>
+                    {PERSONALITIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                  </Select>
+                </Row>
+                <Row stacked label="Personality notes" description="Optional. Your own words, e.g. “Talk like a sarcastic best friend”. Added to the preset above.">
+                  <textarea rows={2} value={s.personalityCustom || ''} onChange={set('personalityCustom')} placeholder="How should Artemis talk to you?" />
+                </Row>
+                <Row stacked label="Custom instructions" description="Added to the system prompt of every chat.">
+                  <textarea rows={4} value={s.systemPrompt || ''} onChange={set('systemPrompt')} placeholder="e.g. Keep answers short and direct." />
+                </Row>
+              </Group>
+              <Group title="Startup and background">
+                <SwitchRow label="Keep running in the background" description="Closing the window keeps Artemis running. Needed for the phone bot and scheduled tasks. Artemis stays in the Dock; quit it from the Artemis menu (⌘Q) or the menu bar icon."
+                  checked={s.closeToTray !== false} onChange={put('closeToTray')} />
+                <SwitchRow label="Start Artemis when I log in" checked={!!s.launchAtLogin} onChange={put('launchAtLogin')} />
+              </Group>
+              <Group title="Import">
+                <ImportRow />
+              </Group>
+              <Group title="Memory use">
+                <div className="pref-block"><MemoryPanel /></div>
+              </Group>
+            </>
+          )}
+          {tab === 'appearance' && (
+            <>
+              <Group title="Theme" footer={<>Drop a theme .json in the themes folder and press Refresh — no rebuild. A file is <code>{'{ "id": "my-theme", "name": "My theme", "group": "Gods", "dark": true, "preview": ["#130808","#c9923a","#8c1c1c"], "vars": { "--theme-bg": "#130808", "…": "…" } }'}</code>. A project can also carry its own themes in .artemis/themes; those win over this folder.</>}>
+                <div className="pref-block">
+                  <div className="theme-grid" role="radiogroup" aria-label="Theme">
+                    {themeList.map((t) => (
+                      <button key={t.id} type="button" role="radio" aria-checked={(s.theme || 'system') === t.id} className={`theme-sw ${(s.theme || 'system') === t.id ? 'on' : ''}`} onClick={() => setS((x) => ({ ...x, theme: t.id }))} title={t.source === 'builtin' ? t.name : `${t.name} (${t.source})`} aria-label={t.source === 'builtin' ? t.name : `${t.name} (${t.source})`}>
+                        <i style={{ background: t.id === 'system' ? `linear-gradient(135deg, ${t.preview[0]} 50%, ${t.preview[2]} 50%)` : t.preview[0] }}><b style={{ background: t.preview[1] }} /><b style={{ background: t.preview[2] }} /></i>
+                        <span>{t.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <Row label="Custom themes" description={themeMsg || `${themeList.length} themes${themeInfo.folder ? ' · ' + themeInfo.folder : ''}`}>
+                  <div className="pref-inline">
+                    <button type="button" className="pref-btn" onClick={refreshThemes} disabled={themeBusy}>{themeBusy ? 'Refreshing…' : 'Refresh'}</button>
+                    <button type="button" className="pref-btn" onClick={() => window.api.themesOpen('user').then(refreshThemes).catch(() => {})}>Open folder</button>
+                    <button type="button" className="pref-btn" onClick={importThemes} disabled={themeBusy}>Import .json</button>
+                  </div>
+                </Row>
+              </Group>
+              <Group title="Text">
+                <Row label="Text size" description="Size of the text across the whole app.">
+                  <Select value={s.textSize || 'medium'} onChange={set('textSize')}>{TEXT_SIZES.map(([id, n, px]) => <option key={id} value={id}>{n} ({px}px)</option>)}</Select>
+                </Row>
+                <Row label="Thinking" description="How the model's reasoning shows in replies: a collapsed “Thought for Ns” block you can open, open by default, or not shown. It is never sent back to the model or read aloud.">
+                  <Select value={s.showThinking || 'collapsed'} onChange={set('showThinking')}>
+                    <option value="collapsed">Collapsed</option>
+                    <option value="expanded">Expanded</option>
+                    <option value="hidden">Hidden</option>
+                  </Select>
+                </Row>
+              </Group>
+            </>
+          )}
+          {tab === 'shortcuts' && (
+            <>
+              <Group title="From any app" footer="Click a box, then press the keys. Esc cancels, Clear turns the shortcut off. The push-to-talk key for Sentinel is under Voice.">
+                {[
+                  ['quickChatShortcut', 'Quick chat', 'Opens or hides the Quick window on its Chat tab.', 'CommandOrControl+Shift+Space'],
+                  ['quickSearchShortcut', 'Quick search', 'Opens the Quick window on its Search tab (chats, notes, files, actions).', 'e.g. CommandOrControl+Shift+F'],
+                  ['sentinelShortcut', 'Sentinel on/off', 'Turns Sentinel (voice mode) on or off without bringing Artemis to the front.', 'CommandOrControl+Shift+A'],
+                  ['lockShortcut', 'Lock Artemis', 'Locks the app right away (needs a password set in Security).', 'CommandOrControl+Alt+Shift+L']
+                ].map(([k, label, about, ph]) => (
+                  <ShortcutField key={k} label={label} about={about} placeholder={ph} value={s[k]} onChange={put(k)}
+                    error={s[k] === settings[k] ? ((settings.shortcutErrors || {})[k] || '') : ''} />
+                ))}
+              </Group>
+              <Group title="In Artemis">
+                <ShortcutField label="Command palette" about="Opens or closes the command palette in the Artemis window." placeholder="CommandOrControl+K" value={s.paletteShortcut} onChange={put('paletteShortcut')}
+                  error={s.paletteShortcut === settings.paletteShortcut ? ((settings.shortcutErrors || {}).paletteShortcut || '') : ''} />
+                <SwitchRow label="Quick chat shortcut opens the palette" description="With the Artemis window in front, the Quick chat shortcut opens the command palette instead of the Quick window (the old behaviour)."
+                  checked={!!s.paletteFromQuickShortcut} onChange={put('paletteFromQuickShortcut')} />
+              </Group>
+              {settings.shortcutError && !settings.shortcutErrors && <Note tone="err">{settings.shortcutError}</Note>}
             </>
           )}
           {tab === 'providers' && <ProvidersTab s={s} set={set} settings={settings} providers={providers} onProviders={onProviders} onApply={onApply} />}
           {tab === 'tools' && (
             <>
-              <label className="check"><input type="checkbox" checked={s.toolsEnabled} onChange={set('toolsEnabled')} /> Tools on by default in new chats (files, memory, notes, web, terminal)<br /><small className="muted">You can switch tools on or off per chat with the “Tools” pill next to the model picker. Off sends much smaller requests, which small local models and free tiers need.</small></label>
-              <label className="check"><input type="checkbox" checked={s.autoApproveEdits} onChange={set('autoApproveEdits')} /> <span>Auto-allow all in new chats<br /><small>Off by default: every action asks. On: file edits, agent file writes, web, terminal, computer control, Make and connectors run without asking. Deleting files always asks. Each chat can switch to "Ask every time" next to the message box. Messages from your phone follow this too, but only file edits are auto-allowed there.</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.memoryEnabled} onChange={set('memoryEnabled')} /> Memory enabled</label>
-              <label className="check"><input type="checkbox" checked={s.webEnabled} onChange={set('webEnabled')} /> Web search and page fetch</label>
-              <label className="check"><input type="checkbox" checked={s.notesAi !== false} onChange={set('notesAi')} /> <span>Notes knowledge base<br /><small>Artemis can search and read your notes after you approve.</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.shellEnabled} onChange={set('shellEnabled')} /> <span>Terminal commands<br /><small>Asks once per task.</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.computerEnabled} onChange={set('computerEnabled')} /> <span>Computer control (macOS)<br /><small>Screen, mouse and keyboard. Asks once per task. Emergency stop: Cmd+Shift+Esc.</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.connectorsEnabled !== false} onChange={set('connectorsEnabled')} /> Connectors (MCP servers)</label>
-              <label className="check"><input type="checkbox" checked={s.fullFileAccess !== false} onChange={set('fullFileAccess')} /> <span>Full file access<br /><small>The assistant can reach files anywhere on this computer, not only in the project folder. It asks first: once per outside folder for reading, every time for keys and credentials, and for every change</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.toolsLazy !== false} onChange={set('toolsLazy')} /> <span>Switch heavy tools on only when needed<br /><small>Saves tokens: computer control, terminal, media, phone, scheduling, helper agents and Make are sent only after the assistant asks for them. Files, web, memory and notes are always on.</small></span></label>
-              <label className="check"><input type="checkbox" checked={s.connectorsLazy !== false} onChange={set('connectorsLazy')} /> <span>Switch connectors on only when needed<br /><small>Saves tokens: connector tools are sent only after the assistant asks for that app.</small></span></label>
-              <fieldset className="group">
-                <legend>Skills &amp; learning</legend>
-                <label className="check"><input type="checkbox" checked={s.skillsEnabled !== false} onChange={set('skillsEnabled')} /> <span>Skills<br /><small>Artemis can load your saved instructions for tasks you repeat.</small></span></label>
-                <label className="check"><input type="checkbox" checked={s.autoLearn !== false} onChange={set('autoLearn')} /> <span>Let Artemis learn by itself<br /><small>It saves a skill after a task you are likely to repeat and improves skills when you correct it. Off = it asks before saving. Not used in incognito chats or scheduled tasks.</small></span></label>
+              <Group title="Tools">
+                <SwitchRow label="Tools on by default in new chats" description="Files, memory, notes, web and terminal. You can switch tools on or off per chat with the “Tools” pill next to the model picker. Off sends much smaller requests, which small local models and free tiers need."
+                  checked={!!s.toolsEnabled} onChange={put('toolsEnabled')} />
+                <SwitchRow label="Auto-allow all in new chats" description={'Off by default: every action asks. On: file edits, agent file writes, web, terminal, computer control, Make and connectors run without asking. Deleting files always asks. Each chat can switch to "Ask every time" next to the message box. Messages from your phone follow this too, but only file edits are auto-allowed there.'}
+                  checked={!!s.autoApproveEdits} onChange={put('autoApproveEdits')} />
+                <SwitchRow label="Memory" checked={!!s.memoryEnabled} onChange={put('memoryEnabled')} />
+                <SwitchRow label="Web search and page fetch" checked={!!s.webEnabled} onChange={put('webEnabled')} />
+                <SwitchRow label="Notes knowledge base" description="Artemis can search and read your notes after you approve." checked={s.notesAi !== false} onChange={put('notesAi')} />
+                <SwitchRow label="Terminal commands" description="Asks once per task." checked={!!s.shellEnabled} onChange={put('shellEnabled')} />
+                <SwitchRow label="Computer control (macOS)" description="Screen, mouse and keyboard. Asks once per task. Emergency stop: ⌘⇧Esc." checked={!!s.computerEnabled} onChange={put('computerEnabled')} />
+                <SwitchRow label="Browser control" description="Artemis can open pages, click, type and fill forms in the integrated browser while you watch. Asks once per site per task; it never runs in scheduled or phone tasks." checked={s.browserTools !== false} onChange={put('browserTools')} />
+                <SwitchRow label="Connectors (MCP servers)" checked={s.connectorsEnabled !== false} onChange={put('connectorsEnabled')} />
+                <SwitchRow label="Full file access" description="The assistant can reach files anywhere on this computer, not only in the project folder. It asks first: once per outside folder for reading, every time for keys and credentials, and for every change." checked={s.fullFileAccess !== false} onChange={put('fullFileAccess')} />
+              </Group>
+              <Group title="Saving tokens">
+                <SwitchRow label="Switch heavy tools on only when needed" description="Computer control, browser control, terminal, media, phone, scheduling, helper agents and Make are sent only after the assistant asks for them. Files, web, memory and notes are always on." checked={s.toolsLazy !== false} onChange={put('toolsLazy')} />
+                <SwitchRow label="Switch connectors on only when needed" description="Connector tools are sent only after the assistant asks for that app." checked={s.connectorsLazy !== false} onChange={put('connectorsLazy')} />
+              </Group>
+              <Group title="Skills and learning">
+                <SwitchRow label="Skills" description="Artemis can load your saved instructions for tasks you repeat." checked={s.skillsEnabled !== false} onChange={put('skillsEnabled')} />
+                <SwitchRow label="Let Artemis learn by itself" description="It saves a skill after a task you are likely to repeat and improves skills when you correct it. Off = it asks before saving. Not used in incognito chats or scheduled tasks." checked={s.autoLearn !== false} onChange={put('autoLearn')} />
                 {s.autoLearn !== false && (
-                  <Field label="Learning model" hint="After a task with several steps this model decides whether it is worth saving as a skill. You always see the skill first and choose Allow or Deny. A small, cheap model is enough.">
+                  <Row label="Learning model" description="After a task with several steps this model decides whether it is worth saving as a skill. You always see the skill first and choose Allow or Deny. A small, cheap model is enough.">
                     <Select value={s.reflectModel || ''} onChange={set('reflectModel')}>
                       <option value="">Automatic (a small, cheap model)</option>
-                      {chatGroups.map((g) => <optgroup key={g.label} label={g.label}>{g.items.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</optgroup>)}
+                      {modelOptions}
                     </Select>
-                  </Field>
+                  </Row>
                 )}
-                <label className="check"><input type="checkbox" checked={s.chatSearchEnabled !== false} onChange={set('chatSearchEnabled')} /> <span>Search my earlier chats<br /><small>Lets Artemis look things up in your saved chats when you refer to them. Incognito chats are never searched.</small></span></label>
-              </fieldset>
+                <SwitchRow label="Search my earlier chats" description="Lets Artemis look things up in your saved chats when you refer to them. Incognito chats are never searched." checked={s.chatSearchEnabled !== false} onChange={put('chatSearchEnabled')} />
+              </Group>
             </>
           )}
-          {tab === 'access' && <AccessTab s={s} set={set} projects={projects} />}
+          {tab === 'access' && <AccessTab s={s} set={set} setS={setS} projects={projects} goTo={setTab} />}
+          {tab === 'security' && <SecurityTab />}
           {tab === 'brains' && <BrainsTab s={s} setS={setS} chatGroups={chatGroups} />}
-          {tab === 'agents' && <AgentsTab s={s} set={set} chatGroups={chatGroups} />}
+          {tab === 'agents' && <AgentsTab s={s} set={set} setS={setS} chatGroups={chatGroups} />}
           {tab === 'limits' && <LimitsTab s={s} setS={setS} />}
-          {tab === 'voice' && <VoiceTab s={s} setS={setS} providers={providers} chatGroups={chatGroups} />}
+          {tab === 'voice' && <VoiceTab s={s} setS={setS} providers={providers} chatGroups={chatGroups} pttError={s.sentinelPtt === settings.sentinelPtt ? ((settings.shortcutErrors || {}).sentinelPtt || '') : ''} />}
           {tab === 'make' && <MakeTab s={s} setS={setS} />}
-          {tab === 'phone' && <PhoneSettings s={s} set={set} setS={setS} />}
-        </div>
-        <div className="actions-row settings-foot">
-          <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={save}>Save</button>
-        </div>
-      </div>
-    </Modal>
+          {tab === 'phone' && <PhoneTab s={s} setS={setS} onSaveToken={(t) => saveSecret({ telegramToken: t })} />}
+        </Page>
+      </main>
+    </div>
   );
 }

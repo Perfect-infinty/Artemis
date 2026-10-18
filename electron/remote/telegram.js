@@ -1,4 +1,6 @@
 // Telegram bot (long polling). Only the paired private chat can talk to it.
+
+const { stripThink } = require('./think');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -29,6 +31,24 @@ const HELP = `Just write to me. Photos and files (xlsx, csv, pdf, docx, txt) are
 /unpair – disconnect this phone`;
 const { mdToTelegramHtml, splitMarkdown } = require('./tghtml');
 const chunks = (s) => { const out = []; for (let i = 0; i < s.length; i += MAX_MSG) out.push(s.slice(i, i + MAX_MSG)); return out.length ? out : ['(empty)']; };
+/**
+ * Limits /pair guesses: after `max` wrong codes the code is rotated and pairing pauses for `cooldownMs`.
+ * The counter starts over whenever the code changes (new code from Settings, unpair, successful pair).
+ */
+function createPairGuard({ max = 5, cooldownMs = 10 * 60 * 1000, now = Date.now } = {}) {
+  let bad = 0, code = '', lockUntil = 0;
+  return {
+    /** -> 'ok' | 'wrong' | 'locked' (with waitMs) */
+    check(given, current, rotate) {
+      if (current !== code) { code = current; bad = 0; }
+      const t = now();
+      if (lockUntil > t) return { result: 'locked', waitMs: lockUntil - t };
+      if (given === current) { bad = 0; return { result: 'ok' }; }
+      if (++bad >= max) { lockUntil = t + cooldownMs; bad = 0; rotate?.(); return { result: 'locked', waitMs: cooldownMs }; }
+      return { result: 'wrong' };
+    }
+  };
+}
 const sleep = (ms, signal) => new Promise((r) => { const t = setTimeout(r, ms); signal?.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true }); });
 
 /**
@@ -39,7 +59,8 @@ function createTelegram(deps) {
   const base = `${(deps.apiBase || 'https://api.telegram.org').replace(/\/+$/, '')}/bot${deps.token}`;
   const fileBase = `${(deps.apiBase || 'https://api.telegram.org').replace(/\/+$/, '')}/file/bot${deps.token}`;
   let loopPromise = Promise.resolve();
-  let ctrl = null, running = false, botName = '', lastError = '', offset = 0, badPairs = 0;
+  let ctrl = null, running = false, botName = '', lastError = '', offset = 0;
+  const pairGuard = createPairGuard();
   const buttons = new Map(); // short key -> tool id
   let btnSeq = 0;
 
@@ -159,7 +180,8 @@ function createTelegram(deps) {
         } else if (ev.type === 'error') error = ev.message;
       }); } catch (e) { if (e.message === 'busy') return say('Still working on the previous request. Send /stop to cancel it.'); throw e; }
       if (error) await say(`Error: ${error}`);
-      if (final) await sayMd(final);
+      const shown = stripThink(final);
+      if (shown) await sayMd(shown);
       else if (!error) await say('(no reply)');
     } finally { clearInterval(typing); if (shotTimer) { clearTimeout(shotTimer); flushShot(); } }
   }
@@ -298,14 +320,14 @@ function createTelegram(deps) {
 
     if (!paired) {
       const pm = text.match(/^\/pair\s+(\d{6})\s*$/);
-      if (pm && badPairs < 5 && pm[1] === deps.getPairCode()) {
+      const g = pm ? pairGuard.check(pm[1], deps.getPairCode(), () => deps.newPairCode()) : null;
+      if (g && g.result === 'ok') {
         deps.setChatId(cid);
         deps.newPairCode();
-        badPairs = 0;
         await say('Paired. You can now chat with the assistant here. Send /help for commands.');
-      } else if (pm) {
-        badPairs++;
-        if (badPairs >= 5) deps.newPairCode();
+      } else if (g && g.result === 'locked') {
+        await api('sendMessage', { chat_id: cid, text: `Too many wrong codes. Try again in ${Math.ceil(g.waitMs / 60000)} min with the new code shown in Artemis.` }).catch(() => {});
+      } else if (g) {
         await api('sendMessage', { chat_id: cid, text: 'Wrong code.' }).catch(() => {});
       } else if (/^\/start/.test(text)) {
         await api('sendMessage', { chat_id: cid, text: 'Send /pair followed by the 6-digit code shown in Artemis → Settings → Phone.' }).catch(() => {});
@@ -422,4 +444,4 @@ function createTelegram(deps) {
   };
 }
 
-module.exports = { createTelegram };
+module.exports = { createTelegram, createPairGuard };

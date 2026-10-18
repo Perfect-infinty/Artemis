@@ -33,6 +33,21 @@ const ext = path.join(tmp, 'ext', 'my-skill'); fs.mkdirSync(path.join(ext, 'scri
 fs.writeFileSync(path.join(ext, 'SKILL.md'), '---\nname: Imported one\ndescription: From a folder\n---\nDo it.'); fs.writeFileSync(path.join(ext, 'scripts', 'a.py'), 'print(1)');
 r = sk.importFrom(ext); assert.ok(r.ok, JSON.stringify(r)); assert.deepStrictEqual(sk.get('Imported one', null).files, ['scripts/a.py']);
 assert.ok(!sk.importFrom(path.join(tmp, 'ext')).ok);
+const userDir = path.join(tmp, 'skills');
+// re-importing never replaces or deletes an existing skill
+const before = fs.readFileSync(path.join(userDir, 'imported-one', 'SKILL.md'), 'utf8');
+r = sk.importFrom(ext); assert.ok(!r.ok && /already exists/.test(r.error), JSON.stringify(r));
+assert.strictEqual(fs.readFileSync(path.join(userDir, 'imported-one', 'SKILL.md'), 'utf8'), before);
+// a folder name already taken by another skill gets a new slug
+fs.mkdirSync(path.join(userDir, 'other-one')); fs.writeFileSync(path.join(userDir, 'other-one', 'notes.txt'), 'keep');
+const ext3 = path.join(tmp, 'ext3'); fs.mkdirSync(ext3);
+fs.writeFileSync(path.join(ext3, 'SKILL.md'), '---\nname: Other one\ndescription: Other\n---\nY');
+fs.writeFileSync(path.join(ext3, 'big.bin'), Buffer.alloc(6 * 1024 * 1024));
+r = sk.importFrom(ext3); assert.ok(!r.ok && /5 MB/.test(r.error)); assert.ok(fs.existsSync(path.join(userDir, 'other-one', 'notes.txt')), 'failed import keeps the existing folder');
+fs.unlinkSync(path.join(ext3, 'big.bin'));
+r = sk.importFrom(ext3); assert.ok(r.ok && r.slug === 'other-one-2', JSON.stringify(r));
+assert.ok(!fs.readdirSync(userDir).some((n) => n.startsWith('.import-')), 'no temp folders left');
+assert.ok(sk.remove('Other one', null));
 fs.writeFileSync(path.join(tmp, 'one.md'), '---\nname: File skill\ndescription: From a file\n---\nSteps'); assert.ok(sk.importFrom(path.join(tmp, 'one.md')).ok);
 assert.ok(sk.remove('File skill', null)); assert.ok(!sk.remove('File skill', null)); assert.ok(notified > 3);
 

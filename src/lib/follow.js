@@ -1,25 +1,50 @@
 // "Read along": highlights the passage that is being read aloud inside a rendered message.
 // Uses the CSS Custom Highlight API (no DOM changes), matching by words so markdown symbols don't matter.
 const isWord = /[\p{L}\p{N}]/u;
-const norm = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+// lower case without the dot that 'İ' (Turkish, Azerbaijani) gets as a combining mark: one letter stays one letter, so positions line up
+const low = (s) => s.toLowerCase().replace(/̇/g, '');
+const norm = (s) => low(String(s || '')).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * container: the message element, or a function that finds it (a message that is still streaming is re-rendered, so it is
+ * looked up and its text re-mapped on every call; text is only ever appended, so positions found earlier stay valid).
+ */
+// When the reader scrolls by hand while a reply is read aloud, the page must stay where they put it. Any wheel / touch / paging key counts.
+let lastManualScroll = 0;
+if (typeof window !== 'undefined' && window.addEventListener) {
+  const mark = () => { lastManualScroll = performance.now(); };
+  window.addEventListener('wheel', mark, { passive: true, capture: true });
+  window.addEventListener('touchmove', mark, { passive: true, capture: true });
+  window.addEventListener('keydown', (e) => {
+    if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown'].includes(e.key) && !(e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]'))) mark();
+  }, true);
+}
 
 export function createFollower(container) {
   if (!container || !window.CSS || !CSS.highlights || typeof Highlight === 'undefined') return { follow() {}, clear() {} };
-  let full = ''; const map = []; let lastSpace = true;
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.parentElement && n.parentElement.closest('.actions, .code-head, button') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
-  });
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    const t = n.nodeValue;
-    for (let i = 0; i < t.length; i++) {
-      const ch = t[i];
-      if (isWord.test(ch)) { full += ch.toLowerCase(); map.push({ n, o: i }); lastSpace = false; }
-      else if (!lastSpace) { full += ' '; map.push({ n, o: i }); lastSpace = true; }
+  const born = performance.now(); // a scroll after this moment means: stop moving the page for this reply
+  let full = ''; let map = [];
+  const build = () => {
+    const el = typeof container === 'function' ? container() : container;
+    full = ''; map = []; let lastSpace = true;
+    if (!el) return;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement && n.parentElement.closest('.actions, .code-head, button, .thinkblock, .thinking-shimmer, .tool, .tool-group, .approval') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+    });
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const t = n.nodeValue;
+      for (let i = 0; i < t.length; i++) {
+        const ch = t[i];
+        if (isWord.test(ch)) { full += low(ch).charAt(0) || ch; map.push({ n, o: i }); lastSpace = false; }
+        else if (!lastSpace) { full += ' '; map.push({ n, o: i }); lastSpace = true; }
+      }
     }
-  }
+  };
+  build();
   let cursor = 0;
   const clear = () => { try { CSS.highlights.delete('reading'); } catch {} };
   const follow = (chunk) => {
+    if (typeof container === 'function') build(); // the live message may have new text and new DOM nodes
     const words = norm(chunk).split(' ').filter(Boolean);
     if (!words.length) return;
     let head = words.slice(0, 3).join(' '), start = full.indexOf(head, cursor);
@@ -37,7 +62,7 @@ export function createFollower(container) {
       CSS.highlights.set('reading', new Highlight(r));
       cursor = end;
       const el = a.n.parentElement;
-      if (el) { const rect = r.getBoundingClientRect(); if (rect.top < 80 || rect.bottom > window.innerHeight - 180) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+      if (el && el.offsetParent && lastManualScroll <= born) { const rect = r.getBoundingClientRect(); if (rect.top < 80 || rect.bottom > window.innerHeight - 180) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
     } catch {}
   };
   return { follow, clear };

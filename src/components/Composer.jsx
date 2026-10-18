@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Select from './Select.jsx';
 import { AttachmentChip } from './Message.jsx';
 import ModelPicker from './ModelPicker.jsx';
@@ -8,9 +8,13 @@ import { startRecording, transcribe, LANGS } from '../lib/voice.js';
 import { costOf, fmtUsd } from '../lib/cost.js';
 import { fmtTokens } from '../lib/amount.mjs';
 import { ClaudeUsageFor } from './ClaudeUsage.jsx';
+import { splitMentions, liveMentions, tokenBefore, cleanMentions } from '../lib/mentions.mjs';
+import { useSentinelKey } from '../lib/sentinelKey.js';
 
 // Text and attachments typed into a chat that is not on screen right now (another tab or chat), so nothing is lost when you switch.
 const drafts = new Map();
+// Skills, agents, connectors and Make seen in the last "@" menu: an "@name" typed by hand that matches one of them is a mention too.
+let knownMentions = [];
 
 function useOutside(ref, on, cb) {
   useEffect(() => {
@@ -50,11 +54,11 @@ function UsageMenu({ settings, chatId, model, onDetails, onLimits, stacked }) {
   };
   return (
     <span className="um-wrap" ref={ref}>
-      <button className={`icon-btn ${open ? 'on' : ''} ${stacked ? 'um-row-btn' : ''}`} title="Usage" onClick={toggle}><Icon name="chart" size={stacked ? 15 : 17} />{stacked && <span>Usage</span>}</button>
+      <button className={`icon-btn ${open ? 'on' : ''} ${stacked ? 'um-row-btn' : ''}`} title="Usage" aria-label="Usage" onClick={toggle}><Icon name="chart" size={stacked ? 15 : 17} />{stacked && <span>Usage</span>}</button>
       {open && (
         <div className="um-pop">
           <div className="um-title">Usage</div>
-          {rows === null ? <div className="muted small">Loading…</div> : (
+          {rows === null ? <div className="skeleton-rows" role="status" aria-label="Loading"><i /><i /><i /></div> : (
             <>
               <Row label="This chat" v={ch} />
               <Row label="Today" v={d} tokLimit={settings.dailyTokenLimit} usdLimit={settings.dailyUsdLimit} />
@@ -75,10 +79,10 @@ function MicButton({ settings, onText, onVoiceSettings, onError }) {
   const [state, setState] = useState('idle'); // idle | rec | busy
   const [secs, setSecs] = useState(0);
   const [menu, setMenu] = useState(false);
-  const [lang, setLang] = useState(settings.voiceLanguage === 'en' ? 'en' : 'auto');
+  const [lang, setLang] = useState(settings.voiceLanguage || 'auto');
   const rec = useRef(null); const wrap = useRef(null);
   useOutside(wrap, menu, () => setMenu(false));
-  useEffect(() => { setLang(settings.voiceLanguage === 'en' ? 'en' : 'auto'); }, [settings.voiceLanguage]);
+  useEffect(() => { setLang(settings.voiceLanguage || 'auto'); }, [settings.voiceLanguage]);
   useEffect(() => {
     if (state !== 'rec') return undefined;
     setSecs(0);
@@ -105,11 +109,11 @@ function MicButton({ settings, onText, onVoiceSettings, onError }) {
   const mm = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
   return (
     <span className="mic-wrap" ref={wrap}>
-      <button className={`icon-btn mic ${state}`} title={state === 'rec' ? 'Stop and transcribe (Esc cancels)' : state === 'busy' ? 'Transcribing…' : 'Dictate'} onClick={click}>
+      <button className={`icon-btn mic ${state}`} title={state === 'rec' ? 'Stop and transcribe (Esc cancels)' : state === 'busy' ? 'Transcribing…' : 'Dictate'} aria-label={state === 'rec' ? 'Stop and transcribe (Esc cancels)' : state === 'busy' ? 'Transcribing…' : 'Dictate'} onClick={click}>
         {state === 'busy' ? <Icon name="spinner" size={17} /> : state === 'rec' ? <Icon name="stop" size={15} /> : <Icon name="mic" size={17} />}
       </button>
       {state === 'rec' && <span className="mic-time">{mm}</span>}
-      {state === 'idle' && <button className="icon-btn mic-more" title="Voice language" onClick={() => setMenu(!menu)}><Icon name="chevronDown" size={13} /></button>}
+      {state === 'idle' && <button className="icon-btn mic-more" title="Voice language" aria-label="Voice language" onClick={() => setMenu(!menu)}><Icon name="chevronDown" size={13} /></button>}
       {menu && (
         <div className="um-pop mic-pop">
           <div className="um-title">Dictation language</div>
@@ -173,15 +177,21 @@ export function ChatPills({ brains = [], brain, onBrain, councilPick, onRevote, 
 }
 
 export default function Composer({ streaming, onSend, onStop, queue = [], queueHeld = false, onQueue, onUnqueue, onSendNow, disabledReason, placeholder, model, onModel, groups = [], projectId, projects = [], onProject, incognito, settings = {}, chatId, perm = 'auto', onPerm, agents = 'on', onAgents, tools = 'on', onTools, onUsageDetails = () => {}, onOpenSettings = () => {}, sentinel, onSentinel, onCompact, canCompact, compacting, brains = [], brain = '', onBrain, councilPick, onRevote }) {
+  const sKey = useSentinelKey();
   const [text, setText] = useState(() => (drafts.get(chatId) || {}).text || '');
   const [micErr, setMicErr] = useState('');
   const [atts, setAtts] = useState(() => (drafts.get(chatId) || {}).atts || []);
-  useEffect(() => { if (text || atts.length) drafts.set(chatId, { text, atts }); else drafts.delete(chatId); }, [text, atts, chatId]);
+  const [mentions, setMentions] = useState(() => cleanMentions((drafts.get(chatId) || {}).mentions));
+  useEffect(() => { const keep = atts.filter((a) => !a.pending); if (text || keep.length) drafts.set(chatId, { text, atts: keep, mentions }); else drafts.delete(chatId); }, [text, atts, mentions, chatId]);
+  // a token stays a mention only while it reads exactly "@name"; a hand-typed token that matches a known name becomes one
+  useEffect(() => {
+    setMentions((cur) => { const next = liveMentions(text, [...cur, ...knownMentions]); return JSON.stringify(next) === JSON.stringify(cur) ? cur : next; });
+  }, [text]);
   const [drag, setDrag] = useState(false);
   const ta = useRef(null);
-  const [items, setItems] = useState({ skills: [], agents: [], connectors: [] });
+  const [items, setItems] = useState({ skills: [], agents: [], connectors: [], files: [] });
   const [sel, setSel] = useState(0);
-  const [slashOff, setSlashOff] = useState(false);
+  const [slashOff, setSlashOff] = useState(() => /(?:^|\s)@[^\s@]*$/.test(text)); // a restored draft ending in @ must not pop the menu open by itself
 
   // "@" menu: typing @ (at the start or after a space) lists files, skills, agents and connectors
   const m = /(?:^|\s)@([^\s@]*)$/.exec(text);
@@ -191,40 +201,95 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
   useEffect(() => {
     if (!slashOpen) return;
     let live = true;
-    Promise.all([window.api.skillsList(folder).catch(() => []), window.api.agentsList(folder).catch(() => []), window.api.mcpStatus().catch(() => [])])
-      .then(([sk, ag, cn]) => { if (live) setItems({ skills: (sk || []).filter((x) => x.enabled !== false), agents: ag || [], connectors: (Array.isArray(cn) ? cn : []).filter((x) => x.state === 'connected') }); });
+    Promise.all([window.api.skillsList(folder).catch(() => []), window.api.agentsList(folder).catch(() => []), window.api.mcpStatus().catch(() => []), window.api.libList().catch(() => null), window.api.notesList().catch(() => null)])
+      .then(([sk, ag, cn, fl, nt]) => {
+        if (!live) return;
+        const next = { files: fl && fl.ok ? fl.items : [], notes: nt && nt.ok ? (nt.items || []).filter((x) => !x.dir) : [], skills: (sk || []).filter((x) => x.enabled !== false), agents: ag || [], connectors: (Array.isArray(cn) ? cn : []).filter((x) => x.state === 'connected') };
+        setItems(next);
+        knownMentions = cleanMentions([...next.skills.map((x) => ({ kind: 'skill', name: x.name })), ...next.agents.map((x) => ({ kind: 'agent', name: x.name })), ...next.connectors.map((x) => ({ kind: 'connector', name: x.name })), ...(settings.makeEnabled !== false && settings.hasMakeToken ? [{ kind: 'make', name: 'Make' }] : [])]);
+      });
     return () => { live = false; };
   }, [slashOpen, folder]);
   const entries = !slashOpen ? [] : [
     { kind: 'files', name: 'Add files', desc: '' },
+    ...items.files.filter((x) => !q || x.name.toLowerCase().includes(q)).slice(0, 8).map((x) => ({ kind: 'file', name: x.name, path: x.path, desc: (x.path.includes('/') ? x.path.slice(0, x.path.lastIndexOf('/')) + ' · ' : '') + (x.size < 1048576 ? Math.max(1, Math.round(x.size / 1024)) + ' KB' : (x.size / 1048576).toFixed(1) + ' MB') })),
+    ...(items.notes || []).filter((x) => !q || (x.name || x.path).toLowerCase().includes(q)).slice(0, 8).map((x) => ({ kind: 'note', name: (x.name || x.path).replace(/\.md$/i, ''), path: x.path, desc: x.path.includes('/') ? x.path.slice(0, x.path.lastIndexOf('/')) : 'Note' })),
     ...items.skills.map((x) => ({ kind: 'skill', name: x.name, desc: x.description })),
     ...items.agents.map((x) => ({ kind: 'agent', name: x.name, desc: x.description })),
     ...(settings.makeEnabled !== false ? [{ kind: 'connector', name: 'Make', make: true, desc: settings.hasMakeToken ? 'Make.com scenarios' : 'Not connected: add your API token in Settings' }] : []),
     ...items.connectors.map((x) => ({ kind: 'connector', name: x.name, desc: `${(x.tools || []).length} tools` }))
   ].filter((e) => !q || e.name.toLowerCase().includes(q));
+  const popRef = useRef(null);
+  // size and place the @ menu where there is room: above the box, or below it when the box sits near the top (e.g. on Home)
+  useLayoutEffect(() => {
+    const el = popRef.current; if (!el || !el.parentElement) return;
+    const r = el.parentElement.getBoundingClientRect();
+    const above = r.top - 64, below = window.innerHeight - r.bottom - 16;
+    const flip = above < 230 && below > above;
+    const room = Math.max(160, Math.min(340, flip ? below : above));
+    el.style.maxHeight = room + 'px';
+    el.style.top = flip ? 'calc(100% + 8px)' : 'auto';
+    el.style.bottom = flip ? 'auto' : 'calc(100% + 8px)';
+    el.scrollTop = 0;
+  }, [slashOpen, q]);
+  useEffect(() => { const el = popRef.current && popRef.current.querySelector('.slash-item.on'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); }, [sel]);
   useEffect(() => { setSel(0); }, [q, slashOpen]);
   useEffect(() => { if (!m) setSlashOff(false); }, [!!m]);
+  const attachNote = async (rel) => {
+    const r = await window.api.notesAttach(rel);
+    if (r && r.ok) setAtts((a) => (a.some((x) => x.note === r.attachment.note) ? a : [...a, r.attachment]));
+  };
+  const attachLib = async (rel) => {
+    const r = await window.api.libAttach(rel);
+    if (r && r.ok) setAtts((a) => (a.some((x) => x.lib === r.attachment.lib) ? a : [...a, r.attachment]));
+  };
+  // "Use in chat" from the Files page
+  useEffect(() => {
+    const take = () => { const q = window.__pendingLibAttach; if (q && q.length) { window.__pendingLibAttach = []; q.forEach(attachLib); } };
+    take();
+    window.addEventListener('artemis:attach-file', take);
+    return () => window.removeEventListener('artemis:attach-file', take);
+  }, []);
   const choose = (e) => {
     if (!e) return;
     const base = text.replace(/(^|\s)@[^\s@]*$/, '$1');
     if (e.kind === 'files') { setText(base); pick(); return; }
+    if (e.kind === 'note') { setText(base); attachNote(e.path); setTimeout(() => ta.current?.focus(), 0); return; }
+    if (e.kind === 'file') { setText(base); attachLib(e.path); setTimeout(() => ta.current?.focus(), 0); return; }
     if (e.make && !settings.hasMakeToken) { setText(base); onOpenSettings('make'); return; }
-    const ins = e.make ? 'Use Make to ' : e.kind === 'skill' ? `Use the "${e.name}" skill. ` : e.kind === 'connector' ? `Use the ${e.name} connector to ` : `Use the ${e.name} agent (delegate) for this: `;
-    setText(base + ins);
-    setTimeout(() => ta.current?.focus(), 0);
+    // a short highlighted token ("@artemis") instead of a sentence; the model gets the meaning with the send (see mentionHint)
+    const mt = { kind: e.make ? 'make' : e.kind, name: e.name };
+    const next = base + '@' + e.name + ' ';
+    setMentions((cur) => cleanMentions([...cur, mt]));
+    setText(next);
+    setTimeout(() => { const el = ta.current; if (el) { el.focus(); el.setSelectionRange(next.length, next.length); } }, 0);
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ta.current;
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 220) + 'px';
-  }, [text]);
+    syncMirror();
+  }, [text, mentions]);
 
+  // placeholders with a spinner while the files are read, replaced by the real chips when parsing is done
   const addFiles = async (list) => {
-    const parsed = await filesToAttachments(list);
-    setAtts((a) => [...a, ...parsed]);
+    const files = [...(list || [])]; if (!files.length) return;
+    const tag = 'p' + Math.random().toString(36).slice(2);
+    setAtts((a) => [...a, ...files.map((f, i) => ({ pending: tag, key: tag + i, name: f.name, kind: 'pending' }))]);
+    let parsed = [];
+    try { parsed = await filesToAttachments(files); } catch (e) { parsed = [{ kind: 'error', name: files[0].name, error: (e && e.message) || String(e) }]; }
+    setAtts((a) => { const i = a.findIndex((x) => x.pending === tag); const rest = a.filter((x) => x.pending !== tag); if (i < 0) return [...rest, ...parsed]; rest.splice(Math.min(i, rest.length), 0, ...parsed); return rest; });
   };
+  // suggestion chips on an empty chat put their text here
+  useEffect(() => {
+    const h = (e) => { const d = e.detail || {}; if (d.chatId !== chatId) return; setText(d.text || ''); setTimeout(() => { const el = ta.current; if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 0); };
+    window.addEventListener('artemis:composer-fill', h);
+    return () => window.removeEventListener('artemis:composer-fill', h);
+  }, [chatId]);
+  const [focused, setFocused] = useState(false);
+  const mac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '');
 
   useEffect(() => onWindowDrop((fl) => addFiles(fl)), []);
 
@@ -233,27 +298,55 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
     if (r.length) setAtts((a) => [...a, ...r]);
   };
 
-  const hasInput = !!text.trim() || atts.some((a) => a.kind !== 'error');
-  const submit = () => {
-    const good = atts.filter((a) => a.kind !== 'error');
+  // Highlighted "@" tokens: a backdrop behind the textarea shows the same text with the tokens styled; the textarea text itself is transparent.
+  const mirror = useRef(null);
+  const shown = liveMentions(text, mentions);
+  const hasMirror = shown.length > 0;
+  function syncMirror() {
+    const el = ta.current, mr = mirror.current;
+    if (!el || !mr) return;
+    mr.style.height = el.offsetHeight + 'px';
+    mr.style.paddingRight = (2 + Math.max(0, el.offsetWidth - el.clientWidth)) + 'px'; // a visible scrollbar narrows the textarea's text
+    mr.scrollTop = el.scrollTop;
+  }
+  const onKeyBackspace = (e) => {
+    if (e.key !== 'Backspace' || !shown.length || e.altKey || e.metaKey || e.ctrlKey) return false;
+    const el = e.currentTarget;
+    if (el.selectionStart !== el.selectionEnd) return false;
+    const r = tokenBefore(text, el.selectionStart, shown);
+    if (!r) return false;
+    e.preventDefault();
+    setText(text.slice(0, r.start) + text.slice(r.end));
+    setTimeout(() => { const t = ta.current; if (t) t.setSelectionRange(r.start, r.start); }, 0);
+    return true;
+  };
+
+  const parsing = atts.some((a) => a.pending);
+  const hasInput = !!text.trim() || atts.some((a) => a.kind !== 'error' && !a.pending);
+  const submit = (fromKey) => {
+    if (parsing) return; // wait until the attachments are read
+    const good = atts.filter((a) => a.kind !== 'error' && !a.pending);
     if (streaming) {
-      // typing while an answer is being written queues the message; an empty box stops the answer
-      if (!text.trim() && !good.length) return onStop();
+      // typing while an answer is being written queues the message; the Stop button (or Esc) stops the answer.
+      // Enter on an empty box does nothing: an accidental Enter must not throw away an answer.
+      if (!text.trim() && !good.length) return fromKey ? undefined : onStop();
       if (!onQueue) return onStop();
       drafts.delete(chatId);
-      onQueue(text.trim(), good);
-      setText(''); setAtts([]);
+      const qm = liveMentions(text, mentions);
+      onQueue(text.trim(), good, qm.length ? { mentions: qm } : undefined);
+      setText(''); setAtts([]); setMentions([]);
       return;
     }
     if (!text.trim() && !good.length) return;
     drafts.delete(chatId); // the box may be unmounted by onSend (Home opens the new chat), so its effect would never clear the saved draft
-    onSend(text.trim(), good);
-    setText(''); setAtts([]);
+    const sm = liveMentions(text, mentions);
+    onSend(text.trim(), good, sm.length ? { mentions: sm } : undefined);
+    setText(''); setAtts([]); setMentions([]);
   };
 
   const onPaste = async (e) => {
     const fl = [...(e.clipboardData?.files || [])];
-    if (fl.length) { e.preventDefault(); const parsed = await filesToAttachments(fl); setAtts((a) => [...a, ...parsed]); }
+    if (fl.length) { e.preventDefault(); addFiles(fl); }
   };
 
   return (
@@ -271,28 +364,28 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
                 <Icon name="clock" size={14} />
                 <span className="queue-text">{q.text || `${(q.atts || []).length} attachment${(q.atts || []).length === 1 ? '' : 's'}`}</span>
                 <button className="queue-send" onClick={() => onSendNow && onSendNow(q.id)} title="Stop the current answer and send this now">Send now</button>
-                <button className="icon-btn" onClick={() => onUnqueue && onUnqueue(q.id)} title="Remove from the queue"><Icon name="x" size={13} /></button>
+                <button className="icon-btn" onClick={() => onUnqueue && onUnqueue(q.id)} title="Remove from the queue" aria-label="Remove from the queue"><Icon name="x" size={13} /></button>
               </div>
             ))}
             {queueHeld && <div className="queue-note">Queue paused because you stopped the answer. Press Send now to continue.</div>}
           </div>
         )}
         {atts.length > 0 && (
-          <div className="chips">{atts.map((a, i) => <AttachmentChip key={i} a={a} onRemove={() => setAtts(atts.filter((_, j) => j !== i))} />)}</div>
+          <div className="chips">{atts.map((a, i) => <AttachmentChip key={a.key || i} a={a} onRemove={a.pending ? undefined : () => setAtts(atts.filter((_, j) => j !== i))} />)}</div>
         )}
         {slashOpen && entries.length > 0 && (
-          <div className="slash-pop">
-            {['files', 'skill', 'agent', 'connector'].map((k) => {
+          <div className="slash-pop" ref={popRef}>
+            {['files', 'file', 'note', 'skill', 'agent', 'connector'].map((k) => {
               const rows = entries.filter((e) => e.kind === k);
               if (!rows.length) return null;
               return (
                 <div key={k}>
-                  {k !== 'files' && <div className="slash-title">{k === 'skill' ? 'Skills' : k === 'agent' ? 'Agents' : 'Connectors'}</div>}
+                  {k !== 'files' && <div className="slash-title">{k === 'file' ? 'Files' : k === 'note' ? 'Notes' : k === 'skill' ? 'Skills' : k === 'agent' ? 'Agents' : 'Connectors'}</div>}
                   {rows.map((e) => {
                     const i = entries.indexOf(e);
                     return (
                       <button key={k + e.name} className={`slash-item ${i === sel ? 'on' : ''}`} onMouseEnter={() => setSel(i)} onMouseDown={(ev) => { ev.preventDefault(); choose(e); }}>
-                        <Icon name={k === 'files' ? 'paperclip' : k === 'skill' ? 'sparkle' : k === 'connector' ? 'plug' : 'user'} size={15} />
+                        <Icon name={k === 'files' ? 'paperclip' : k === 'file' || k === 'note' ? 'file' : k === 'skill' ? 'sparkle' : k === 'connector' ? 'plug' : 'user'} size={15} />
                         <span className="slash-name">{e.name}</span>
                         {e.desc && <span className="slash-desc">{e.desc}</span>}
                       </button>
@@ -303,10 +396,20 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
             })}
           </div>
         )}
+        <div className="ta-wrap">
+        {hasMirror && (
+          <div className="ta-mirror" ref={mirror} aria-hidden="true">
+            {splitMentions(text, shown).map((p, i) => (p.mention ? <span key={i} className="mention">{p.text}</span> : <React.Fragment key={i}>{p.text}</React.Fragment>))}{'\u200b'}
+          </div>
+        )}
         <textarea
-          ref={ta} rows={1} value={text} autoFocus
-          placeholder={disabledReason || placeholder || 'Message…  (Enter to send, Shift+Enter for a new line)'}
-          onChange={(e) => setText(e.target.value)}
+          ref={ta} rows={1} value={text} autoFocus className={hasMirror ? 'has-mirror' : undefined}
+          onScroll={syncMirror}
+          placeholder={disabledReason || placeholder || 'Message Artemis…'}
+          aria-label="Message"
+          onChange={(e) => { setSlashOff(false); setText(e.target.value); }}
+          onFocus={() => setFocused(true)}
+          onBlur={() => { setSlashOff(true); setFocused(false); }}
           onPaste={onPaste}
           onKeyDown={(e) => {
             if (slashOpen && entries.length) {
@@ -315,19 +418,24 @@ export default function Composer({ streaming, onSend, onStop, queue = [], queueH
               if ((e.key === 'Enter' || e.key === 'Tab') && !e.nativeEvent.isComposing) { e.preventDefault(); choose(entries[sel]); return; }
             }
             if (slashOpen && e.key === 'Escape') { e.preventDefault(); setSlashOff(true); return; }
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
+            // Esc stops the answer (unless a tool approval is waiting: then Esc is "Deny", handled by the approval card)
+            if (e.key === 'Escape' && streaming && onStop && !document.querySelector('.approve[data-pending="1"]')) { e.preventDefault(); onStop(); return; }
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(true); return; }
+            if (!e.nativeEvent.isComposing) onKeyBackspace(e); // Backspace right after a token removes the whole token
           }}
         />
+        </div>
+        {focused && !text && <div className="kbd-hints" aria-hidden="true"><kbd>↵</kbd> send · <kbd>⇧↵</kbd> newline{streaming ? <> · <kbd>Esc</kbd> stop</> : null}</div>}
         {micErr && <div className="mic-err" onClick={() => setMicErr('')}>{micErr}</div>}
         <div className="composer-bar">
-          <button className="icon-btn" title="Attach any file. Text, code, Excel, CSV, Word, PDF, ZIP and images are read; other files (audio, video, apps) are passed with their name and location. You can also drag or paste files here." onClick={pick}><Icon name="paperclip" size={18} /></button>
+          <button className="icon-btn" title="Attach any file. Text, code, Excel, CSV, Word, PDF, ZIP and images are read; other files (audio, video, apps) are passed with their name and location. You can also drag or paste files here." aria-label="Attach any file. Text, code, Excel, CSV, Word, PDF, ZIP and images are read; other files (audio, video, apps) are passed with their name and location. You can also drag or paste files here." onClick={pick}><Icon name="paperclip" size={18} /></button>
           <MicButton settings={settings} onVoiceSettings={() => onOpenSettings('voice')} onError={setMicErr}
             onText={(t) => { setMicErr(''); setText((x) => (x && !/\s$/.test(x) ? x + ' ' : x) + t); setTimeout(() => ta.current?.focus(), 0); }} />
-          {onSentinel && <button className={`icon-btn sentinel-btn ${sentinel && sentinel !== 'off' ? 'on' : ''}`} title={sentinel && sentinel !== 'off' ? 'Sentinel is on. Click to turn off (⇧⌘A)' : 'Sentinel mode: say “Wake up” to talk hands-free (⇧⌘A)'} onClick={onSentinel}><Icon name="shield" size={17} /></button>}
+          {onSentinel && <button className={`icon-btn sentinel-btn ${sentinel && sentinel !== 'off' ? 'on' : ''}`} title={sentinel && sentinel !== 'off' ? `Sentinel is on. Click to turn off${sKey}` : `Sentinel mode: say “Wake up” to talk hands-free${sKey}`} aria-label={sentinel && sentinel !== 'off' ? `Sentinel is on. Click to turn off${sKey}` : `Sentinel mode: say “Wake up” to talk hands-free${sKey}`} onClick={onSentinel}><Icon name="shield" size={17} /></button>}
           <span className="bar-spacer" />
           {onModel && <ModelPicker value={model} groups={groups} onChange={onModel} className="model" />}
           {onCompact && <button className="icon-btn compact-btn" disabled={!canCompact} title={compacting ? 'Compacting…' : canCompact ? 'Compact: summarize earlier messages to save tokens' : 'Compact is available once the chat has a few messages'} onClick={onCompact}>{compacting ? <Icon name="spinner" size={16} /> : <Icon name="compact" size={16} />}<span className="btn-label">Compact</span></button>}
-          <button className={`send ${streaming && !(hasInput && onQueue) ? 'stop' : ''}`} onClick={submit} title={streaming ? (hasInput && onQueue ? 'Add to the queue' : 'Stop') : 'Send'}><Icon name={streaming && !(hasInput && onQueue) ? 'stop' : 'arrowUp'} size={16} /></button>
+          <button className={`send ${streaming && !(hasInput && onQueue) ? 'stop' : ''}`} onClick={() => submit(false)} disabled={parsing && !streaming} title={streaming ? (hasInput && onQueue ? 'Add to the queue' : 'Stop (Esc)') : parsing ? 'Reading attachments…' : 'Send'} aria-label={streaming ? (hasInput && onQueue ? 'Add to the queue' : 'Stop') : 'Send'}><Icon name={streaming && !(hasInput && onQueue) ? 'stop' : 'arrowUp'} size={16} /></button>
         </div>
       </div>
     </footer>

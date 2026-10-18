@@ -26,6 +26,20 @@ assert(c.memoryAdd('x').id === 'm1' && c.memoryRemove('m1'));
 // channel session changes on reset, passed to runChat
 let seen = [];
 const ch = createChannel(async ({ session, send }) => { seen.push(session); send({ type: 'chunk', text: 'k' }); }, () => {});
+// /pair guesses: lock after 5 wrong codes, cooldown, then a new code works
+{
+  const { createPairGuard } = require('../electron/remote/telegram');
+  let t = 0, code = '111111';
+  const g = createPairGuard({ max: 5, cooldownMs: 1000, now: () => t });
+  const rotate = () => { code = '222222'; };
+  for (let i = 0; i < 4; i++) assert.strictEqual(g.check('000000', code, rotate).result, 'wrong');
+  assert.strictEqual(g.check('000000', code, rotate).result, 'locked'); assert.strictEqual(code, '222222');
+  assert.strictEqual(g.check('222222', code, rotate).result, 'locked', 'locked during cooldown');
+  t = 1001; assert.strictEqual(g.check('222222', code, rotate).result, 'ok', 'not locked forever');
+  // a new code resets the counter
+  for (let i = 0; i < 4; i++) g.check('000000', code, rotate);
+  code = '333333'; for (let i = 0; i < 4; i++) assert.strictEqual(g.check('000000', code, rotate).result, 'wrong');
+}
 (async () => {
   await ch.ask('hi', () => {}); ch.reset(); await new Promise((r) => setTimeout(r, 2)); await ch.ask('hi', () => {});
   assert(seen[0] && seen[0] !== seen[1] || true);

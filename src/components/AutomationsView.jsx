@@ -125,7 +125,7 @@ export default function AutomationsView({ onOpenSettings }) {
               return (
                 <div key={s.id} className={`auto-row ${s.isActive ? 'on' : 'off'}`}>
                   <div className="auto-main">
-                    <button className="auto-exp" onClick={() => expand(s)} title="Show the latest runs"><Icon name="chevronRight" size={15} /></button>
+                    <button className="auto-exp" onClick={() => expand(s)} title="Show the latest runs" aria-label="Show the latest runs"><Icon name="chevronRight" size={15} /></button>
                     <span className={`auto-dot ${s.isActive ? 'on' : ''}`} title={s.isActive ? 'On' : 'Off'} />
                     <div className="auto-info">
                       <div className="auto-name">{s.name}</div>
@@ -136,7 +136,7 @@ export default function AutomationsView({ onOpenSettings }) {
                       </div>
                     </div>
                     <button className="auto-btn" disabled={!!busy[s.id]} onClick={() => run(s)} title="Run once now">{busy[s.id] === 'run' ? <Icon name="spinner" size={13} /> : <Icon name="play" size={13} />} Run</button>
-                    <button className="auto-btn icon" onClick={() => window.open(s.url, '_blank')} title="Open in Make"><Icon name="globe" size={14} /></button>
+                    <button className="auto-btn icon" onClick={() => window.open(s.url, '_blank')} title="Open in Make" aria-label="Open in Make"><Icon name="globe" size={14} /></button>
                     <label className="switch" title={s.isActive ? 'Turn off' : 'Turn on'}>
                       <input type="checkbox" checked={!!s.isActive} disabled={busy[s.id] === 'toggle'} onChange={() => toggle(s)} /><i />
                     </label>

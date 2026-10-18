@@ -25,5 +25,22 @@ const assert = require('assert');
   assert.strictEqual(formatValue(t([['=IFERROR(1/0,"x")']])(0, 0, 0)), 'x');
   assert.strictEqual(formatValue(t([['=1+']])(0, 0, 0)), '#VALUE!');
   assert.strictEqual(formatValue(t([['=\'S\'!A2'], [7]])(0, 0, 0)), '7');
+  // long dependency chains do not overflow the stack
+  const chain = [[1]]; for (let i = 1; i < 20000; i++) chain.push([`=A${i}+1`]);
+  assert.strictEqual(formatValue(t(chain)(0, 19999, 0)), '20000');
+  const sums = [[1]]; for (let i = 1; i < 5000; i++) sums.push([`=SUM(A${i}:A${i})*1`]);
+  assert.strictEqual(formatValue(t(sums)(0, 4999, 0)), '1');
+  const cyc = t([['=B1', '=A1']]); assert.strictEqual(formatValue(cyc(0, 0, 0)), '#CYCLE!');
+  // ROUND is half away from zero
+  assert.strictEqual(formatValue(t([['=ROUND(-2.5,0)']])(0, 0, 0)), '-3');
+  assert.strictEqual(formatValue(t([['=ROUND(2.5,0)']])(0, 0, 0)), '3');
+  assert.strictEqual(formatValue(t([['=ROUND(-1.005,2)']])(0, 0, 0)), '-1.01');
+  assert.strictEqual(formatValue(t([['=ROUND(1234,-2)']])(0, 0, 0)), '1200');
+  // TODAY is the local date
+  const d = new Date(); const local = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  assert.strictEqual(formatValue(t([['=TODAY()']])(0, 0, 0)), local);
+  // MIN/MAX over a range too big to spread into arguments
+  const many = [['=MAX(A2:A300001)', '=MIN(A2:A300001)']]; for (let i = 0; i < 300000; i++) many.push([i - 7]);
+  const mv = t(many); assert.strictEqual(formatValue(mv(0, 0, 0)), '299992'); assert.strictEqual(formatValue(mv(0, 0, 1)), '-7');
   console.log('formula: all tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });

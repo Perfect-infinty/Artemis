@@ -1,6 +1,8 @@
 // Pure helpers for Sentinel mode (no browser APIs, so they can be unit-tested in Node).
 // Wake word detection is done by a small offline recogniser (Vosk) limited to a few words; no AI model or network is involved.
 
+import { TAG_RE, EMOTION_HINT } from './tts-emotion.mjs';
+
 export const RATE = 16000;
 
 // The wake phrase is "Wake up". The offline recogniser is limited to this phrase (and "hey"/"okay" in front of it).
@@ -21,13 +23,16 @@ export function hasWake(text) {
 
 // Talking to Artemis inside a conversation: the sentence starts with his name ("Artemis, open settings", "hey Artemis ...").
 // Speech-to-text often spells the name differently, so a few common spellings count.
+// The name as Whisper writes it in other scripts (Russian, Ukrainian, Arabic, Japanese …), and with a Turkish/Azerbaijani case ending ("Artemis'e").
+const NAME_OTHER = /^(артемис|артемида|артеміс|артеміда|أرتميس|آرتمیس|アルテミス|阿尔忒弥斯)[\p{P}]*$/iu;
+const NAME_SUFFIX = /^artemis(e|i|in|le|dir)$/; // after bare(): apostrophes are gone
 const NAMES = ['artemis', 'artemus', 'artemas', 'artemes', 'artemiss', 'artimis', 'artemis,', 'art amiss', 'our themis', 'artemist'];
 /** Text after the name when the sentence starts with it (or with "Wake up"), otherwise null. */
 export function afterName(text) {
   const words = String(text || '').trim().split(/\s+/).filter(Boolean);
   let i = 0;
   if (words.length && ['hey', 'hi', 'ok', 'okay', 'yo'].includes(bare(words[0]))) i = 1;
-  if (i < words.length && NAMES.includes(bare(words[i]))) return tidy(words.slice(i + 1));
+  if (i < words.length && (NAMES.includes(bare(words[i])) || NAME_OTHER.test(words[i]) || NAME_SUFFIX.test(bare(words[i])))) return tidy(words.slice(i + 1));
   const w = matchWake(words);
   return w < 0 ? null : tidy(words.slice(w));
 }
@@ -69,9 +74,13 @@ export function afterWake(text) {
 }
 
 // Speech-to-text often invents a few stock phrases from room noise. Inside a conversation these must not be sent as a message.
-const NOISE = new Set(['you', 'thank you', 'thanks', 'thanks for watching', 'thank you for watching', 'okay', 'ok', 'hmm', 'mm', 'uh', 'um', 'ah', 'oh']);
+// What speech-to-text makes of clicks, typing and breathing (it never returns nothing): dropped unless it is a command
+const NOISE = new Set(['you', 'thank you', 'thanks', 'thanks for watching', 'thank you for watching', 'okay', 'ok', 'hmm', 'hm', 'mm', 'mhm', 'uh huh', 'huh', 'uh', 'um', 'ah', 'oh', 'so', 'and', 'the', 'a', 'i', 'well', 'bye', 'you know', 'so so', 'oh okay']);
 export function looksLikeNoise(text) {
-  const t = deburr(String(text || '')).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const raw = String(text || '');
+  // words in another script (Cyrillic, Arabic, CJK …) are speech, not noise; the checks below only know Latin letters
+  if ((raw.match(/\p{L}/gu) || []).filter((ch) => !/\p{Script=Latin}/u.test(ch)).length >= 2) return false;
+  const t = deburr(raw).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
   return t.length < 2 || NOISE.has(t);
 }
 
@@ -88,7 +97,7 @@ export function rms(f32) {
 export class Segmenter {
   constructor({ rate = RATE, silenceMs = 850, noSpeechMs = 7000, maxMs = 40000, minRms = 0.012, factor = 3, noise = 0.004 } = {}) {
     Object.assign(this, { rate, silenceMs, noSpeechMs, maxMs, minRms, factor });
-    this.noise = noise; this.ms = 0; this.quiet = 0; this.spoke = false; this.speechMs = 0;
+    this.noise = noise; this.ms = 0; this.quiet = 0; this.spoke = false; this.speechMs = 0; this.run = 0; this.maxRun = 0;
   }
   get threshold() { return Math.max(this.minRms, this.noise * this.factor); }
   feed(chunk) {
@@ -96,7 +105,14 @@ export class Segmenter {
     const level = rms(chunk);
     this.ms += ms;
     this.level = level;
-    if (level > this.threshold) { this.spoke = true; this.quiet = 0; this.speechMs += ms; }
+    // Voiced time is counted in 20 ms frames, not whole chunks (a chunk is ~250 ms): a key click is loud for only a frame or two,
+    // while speech stays loud for a syllable (100 ms or more) at a time. maxRun is the longest unbroken loud stretch.
+    const th = this.threshold, fl = Math.max(1, Math.round(this.rate / 50));
+    for (let i = 0; i < chunk.length; i += fl) {
+      if (rms(chunk.subarray(i, Math.min(chunk.length, i + fl))) > th) { this.speechMs += 20; this.run += 20; if (this.run > this.maxRun) this.maxRun = this.run; }
+      else this.run = 0;
+    }
+    if (level > this.threshold) { this.spoke = true; this.quiet = 0; }
     else {
       this.quiet += ms;
       if (!this.spoke || this.quiet > 400) this.noise = this.noise * 0.95 + level * 0.05; // learn the room noise only from silence
@@ -107,7 +123,7 @@ export class Segmenter {
     return null;
   }
   /** Enough real speech to be worth sending to speech-to-text. */
-  get hasSpeech() { return this.spoke && this.speechMs >= 250; }
+  get hasSpeech() { return this.spoke && this.speechMs >= 250 && this.maxRun >= 120; } // typing or a single knock is not speech
 }
 
 /** Keeps the last `ms` of audio so the start of a sentence is not cut off. */
@@ -142,53 +158,152 @@ export function encodeWav(f32, rate = RATE) {
   return new Uint8Array(buf);
 }
 
-/** Strip Markdown so the voice does not read symbols. */
-export function speakable(md) {
-  return String(md || '')
-    .replace(/```[\s\S]*?```/g, ' code block. ')
-    .replace(/`([^`]*)`/g, '$1')
+/**
+ * Strip Markdown so the voice does not read symbols: code is skipped, links are read by their text, list markers and emoji are dropped.
+ * Emotion tags ("[warm]") are never read: they are removed, or with { tags: true } kept as "[warm] " so takePieces can tell
+ * which piece they belong to (the speaker takes them off again before reading).
+ * With { paras: true } a paragraph break (an empty line) is kept as PARA_MARK so takePieces can pause there (natural pacing).
+ */
+export const PARA_MARK = '\uE000';
+export function speakable(md, { tags = false, paras = false } = {}) {
+  let s0 = String(md || '');
+  const lone = /<\/think(?:ing)?>/i.exec(s0), open = /<think(?:ing)?>/i.exec(s0);
+  if (lone && (!open || lone.index < open.index)) s0 = s0.slice(lone.index + lone[0].length); // reasoning written before a lone closing tag
+  const s1 = s0
+    .replace(/<(think|thinking)>[\s\S]*?(<\/\1>|$)/gi, ' ') // thinking blocks (an unclosed one is still being thought)
+    .replace(/```[\s\S]*?(```|$)/g, '\n') // code is shown in the chat, not read (an unclosed block is still being written)
+    .replace(TAG_RE, (_m, t) => (tags ? ' [' + t.toLowerCase() + '] ' : ' '))
+    .replace(/`([^`\n]*)`/g, '$1')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/https?:\/\/\S+/g, 'link')
-    .replace(/^[#>\-*+\s]+/gm, '')
-    .replace(/[*_~|]/g, '')
-    .replace(/[\p{Extended_Pictographic}\uFE0F\u200D\u20E3\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/gu, '') // emoji are not read out ("smiling face with ...")
-    .replace(/\s+/g, ' ').trim();
+    .replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-*:?[ \t]*)*\|?[ \t]*$/gm, '') // table separator rows
+    .replace(/^[ \t]*(?:\d{1,3}[.)][ \t]+|[#>*+-][#>*+\- \t]*)/gm, '') // headings, quotes, list markers and numbers, rules
+    .replace(/[*_~|`]/g, '')
+    .replace(/[\p{Extended_Pictographic}️‍⃣\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/gu, '') // emoji are not read out ("smiling face with ...")
+    .replace(/([^\s.!?:;,…])[ \t]*\n/g, '$1.\n'); // a heading or list item ends where its line ends
+  return (paras ? s1.replace(/\n[ \t]*\n\s*/g, ' ' + PARA_MARK + ' ') : s1)
+    .replace(/\s+/g, ' ').replace(/ ([.,!?;:])(?=\s|$)/g, '$1').trim();
+}
+
+// Sentence ends: punctuation followed by a space (or the end), so "3.5" is never split.
+const SENT = /[.!?…]+["”')\]]*(?=\s|$)/g;
+// Abbreviations and initials that end in a full stop but do not end the sentence ("Dr. Smith", "e.g. this", "J. K. Rowling").
+const ABBR = /(?:^|[\s("'])(?:mr|mrs|ms|dr|prof|sr|jr|st|mt|vs|fig|vol|approx|dept|corp|cf|al|e\.g|i\.e|a\.m|p\.m|u\.s|u\.k)\.$/i;
+const INITIAL = /(?:^|\s)[A-Z]\.$/;
+// Clause marks where a short pause sounds natural.
+const CLAUSE = /[,;:](?=\s)|[–—]/g;
+
+/** End of the first sentence that is at least `min` long, or -1 (also when the text after it has not arrived yet). */
+function sentenceEnd(s, min, final) {
+  SENT.lastIndex = 0; let m;
+  while ((m = SENT.exec(s))) {
+    const end = m.index + m[0].length;
+    if (end >= s.length && !final) return -1; // nothing after it yet: "3." may still become "3.5"
+    if (m[0][0] === '.') { const head = s.slice(0, m.index + 1); if (ABBR.test(head) || INITIAL.test(head)) continue; }
+    if (end >= min) return end;
+  }
+  return -1;
+}
+
+/** The very first piece starts the voice, so it does not wait for a full stop: the first clause mark, or about eight words. */
+function firstCut(s) {
+  CLAUSE.lastIndex = 0; let m;
+  while ((m = CLAUSE.exec(s))) { const e = m.index + m[0].length; if (e >= 12 && e < s.length) return e; }
+  const words = /\S+\s+/g; let n = 0; let w;
+  while ((w = words.exec(s))) { const e = w.index + w[0].length; if (++n >= 8 && e >= 40) return e; }
+  return -1;
+}
+
+/** Cut a long piece at its last clause mark before `max`, else at its last space. */
+function clauseCut(s, max, min = 40) {
+  const head = s.slice(0, max); let cut = -1; let m;
+  CLAUSE.lastIndex = 0;
+  while ((m = CLAUSE.exec(head))) { const e = m.index + m[0].length; if (e >= min) cut = e; }
+  if (cut > 0) return cut;
+  const sp = head.lastIndexOf(' ');
+  return sp > min ? sp : max;
+}
+
+const LEAD_TAG = /^\s*\[(?:warm|soft|excited|sad|serious)\] /;
+const ANY_TAG = /\[(?:warm|soft|excited|sad|serious)\] /g;
+/** Where the next emotion tag starts (after `from`, with real text before it), or -1. */
+function nextTag(s, from) {
+  ANY_TAG.lastIndex = from; let m;
+  while ((m = ANY_TAG.exec(s))) if (s.slice(0, m.index).trim()) return m.index;
+  return -1;
+}
+
+const PARA_LEAD = /^[\s\uE000]*\uE000\s*/;
+/**
+ * Reading a reply while it is still being written. Call it with the whole text so far; it returns the new pieces
+ * that are ready to be spoken. st = { consumed: 0, spoken: 0, n: 0 } is kept between calls.
+ * The first piece is short (up to the first clause mark) so the voice starts at once; later pieces are whole
+ * sentences, short ones merged, long ones (over `max`) cut at a clause mark.
+ * With final=true the rest is returned too. At most `cap` characters are spoken in total (the chat has the full text).
+ * Returns strings; takePieceItems returns { text, para } objects instead.
+ */
+export function takePieces(md, st, final = false, cap = Infinity, max = 250) {
+  return takePieceItems(md, st, final, cap, max).map((p) => p.text);
 }
 
 /**
- * Reading a reply while it is still being written. Call it with the whole text so far; it returns the new pieces
- * (whole sentences) that are ready to be spoken. st = { consumed: 0, spoken: 0, n: 0 } is kept between calls.
- * With final=true the rest is returned too. At most `cap` characters are spoken in total (the chat has the full text).
+ * Same as takePieces, but each piece is { text, para }: para = the piece ends a paragraph (the speaker pauses longer).
+ * With natural pacing on (st.pacing 'subtle' or 'expressive') sentences are split more eagerly: one sentence per piece unless
+ * it is under ~25 characters, and a paragraph always ends a piece, so the pauses land between sentences. With st.pacing
+ * unset or 'off' the pieces are exactly those of takePieces before pacing existed (para is then always false).
  */
-export function takePieces(md, st, final = false, cap = 900) {
+export function takePieceItems(md, st, final = false, cap = Infinity, max = 250) {
+  const eager = !!st.pacing && st.pacing !== 'off';
   let t = String(md || '');
-  if ((t.match(/```/g) || []).length % 2 === 1) t = t.slice(0, t.lastIndexOf('```')); // a code block that is not closed yet
-  const view = speakable(t);
+  if (!final) {
+    if ((t.match(/```/g) || []).length % 2 === 1) t = t.slice(0, t.lastIndexOf('```')); // a code block that is not closed yet
+    const link = /!?\[[^\]\n]*(?:\]\([^)\s]*)?$/.exec(t); // a link still being written: "[the docs](https://ex"
+    if (link) t = t.slice(0, link.index);
+  }
+  const view = speakable(t, { tags: true, paras: eager });
+  if (st.consumed > view.length) st.consumed = view.length; // the text got shorter (thinking was cut out of it)
   const out = [];
   let rest = view.slice(st.consumed);
-  const take = (piece) => { st.consumed += piece.length; const p = piece.trim(); if (!p) return; out.push(p); st.spoken += p.length; st.n++; };
+  // a paragraph mark right after a piece: it is consumed and the piece gets para: true
+  const skipPara = () => { const m = PARA_LEAD.exec(rest); if (!m) return false; rest = rest.slice(m[0].length); st.consumed += m[0].length; return true; };
+  const blank = (x) => !x.replace(/\uE000/g, ' ').trim();
+  const take = (n) => {
+    const p = rest.slice(0, n).replace(/\s*\uE000\s*/g, ' ').trim(); rest = rest.slice(n); st.consumed += n;
+    const para = eager && skipPara();
+    if (!p) return; out.push({ text: p, para }); st.spoken += p.length; st.n++;
+  };
+  if (eager) skipPara(); // a paragraph break before anything was said
+  const capped = () => { st.capped = true; out.push({ text: 'The rest is in the chat.', para: false }); };
   for (;;) {
-    if (st.spoken >= cap) { st.consumed = view.length; break; }
-    const min = st.n === 0 ? 18 : 40;
-    const re = /[.!?\u2026]+["\u201d')\]]*(\s|$)/g;
-    let m; let cut = -1;
-    while ((m = re.exec(rest))) {
-      const end = m.index + m[0].length;
-      if (!final && !/\s$/.test(m[0])) break; // the sentence may still go on ("3.5")
-      if (end >= min) { cut = end; break; }
-    }
-    // The very first piece: do not wait for a full stop in a long opening sentence, start at a comma.
-    if (cut < 0 && !final && st.n === 0) { const c = /[,;:\u2014]\s/.exec(rest.slice(26)); if (c) cut = 26 + c.index + 1; }
+    if (st.spoken >= cap) { if (!blank(rest) && !st.capped) capped(); st.consumed = view.length; break; }
+    // an emotion tag starts its own piece: a tagged sentence is not merged with others, and the text before a tag is complete
+    const lead = LEAD_TAG.exec(rest);
+    let cut = sentenceEnd(rest, lead ? 1 : st.n === 0 ? 8 : eager ? 25 : st.n === 1 ? 40 : 80, final);
+    if (st.n === 0 && !lead) { const c = firstCut(rest); if (c > 0 && (cut < 0 || c < cut)) cut = c; }
+    const nx = nextTag(rest, lead ? lead[0].length : 0);
+    if (nx > 0 && (cut < 0 || cut > nx)) cut = nx;
+    if (eager) { const pi = rest.indexOf(PARA_MARK); if (pi > 0 && !blank(rest.slice(0, pi)) && (cut < 0 || cut > pi)) cut = pi; } // a paragraph ends the piece
+    if (cut > max || (cut < 0 && rest.trim().length > max)) cut = clauseCut(rest, max);
     if (cut < 0) break;
-    take(rest.slice(0, cut)); rest = rest.slice(cut);
+    take(cut);
   }
-  if (final && st.spoken < cap && rest.trim()) take(rest);
+  if (final && !blank(rest)) { if (st.spoken < cap) take(rest.length); else if (!st.capped) capped(); }
   return out;
 }
 
+/** A whole text in speakable pieces (the same rules as takePieces), for reading a finished reply. */
+export function chunkText(text, max = 250) {
+  return takePieces(text, { consumed: 0, spoken: 0, n: 0 }, true, Infinity, max);
+}
+
+/** chunkText as { text, para } pieces, split for natural pacing when pacing is 'subtle' or 'expressive'. */
+export function chunkPieces(text, { pacing = 'off', max = 250 } = {}) {
+  return takePieceItems(text, { consumed: 0, spoken: 0, n: 0, pacing }, true, Infinity, max);
+}
+
 /** Shorten a reply for reading aloud: whole sentences, at most `max` characters. The full text stays in the chat. */
-export function spokenPart(text, max = 900) {
+export function spokenPart(text, max = Infinity) {
   const t = String(text || '').trim();
   if (t.length <= max) return { text: t, cut: false };
   const head = t.slice(0, max);
@@ -196,6 +311,8 @@ export function spokenPart(text, max = 900) {
   return { text: (i > max * 0.5 ? head.slice(0, i + 1) : head).trim(), cut: true };
 }
 
+export { EMOTION_HINT };
+export { THINKING_HINT } from './tts-pacing.mjs';
 export const VOICE_HINT = 'The user is talking to you by voice (Sentinel mode) and will hear your answer read aloud as well as read it. Answer in the language they used. Keep it short and natural to listen to: a few sentences, no tables, no long lists, no code unless they ask. If a long result is needed, put it in the chat and give a short spoken summary.';
 
 /** Running estimate of the room noise: drops fast when it gets quieter, rises slowly when it gets louder. */

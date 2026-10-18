@@ -4,6 +4,7 @@ const path = require('path');
 function createQuick({ BrowserWindow, screen, isDev, nativeTheme }) {
   let w = null;
   let pos = null; // where the user last dragged the window to
+  let mode = 'chat'; // the tab the window shows: 'chat' or 'search' (the renderer reports Cmd+1 / Cmd+2 switches)
   let shownAt = 0, hiddenAt = 0; // a tray click steals focus for a moment: without these the window opens and instantly closes
   const alive = () => !!w && !w.isDestroyed();
   const WIDTH = 680, COLLAPSED = 106, WITH_CHIPS = 164, EXPANDED = 560;
@@ -19,7 +20,7 @@ function createQuick({ BrowserWindow, screen, isDev, nativeTheme }) {
   function create() {
     w = new BrowserWindow({
       width: WIDTH, height: COLLAPSED, frame: false, transparent: true, resizable: false, movable: true, alwaysOnTop: true,
-      skipTaskbar: true, show: false, hasShadow: true, fullscreenable: false, minimizable: false, maximizable: false,
+      skipTaskbar: true, show: false, hasShadow: false, fullscreenable: false, minimizable: false, maximizable: false,
       backgroundColor: '#00000000',
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
     });
@@ -32,16 +33,23 @@ function createQuick({ BrowserWindow, screen, isDev, nativeTheme }) {
     w.on('closed', () => { w = null; });
   }
 
-  function show() {
+  /** Opens the window on a tab: 'chat' (default) or 'search'. */
+  function show(on) {
+    mode = on === 'search' ? 'search' : 'chat';
     if (!alive()) create();
-    place();
-    const go = () => { if (!alive()) return; shownAt = Date.now(); w.show(); w.focus(); try { if (process.platform === 'darwin') require('electron').app.dock?.show(); } catch {} w.webContents.send('quick:shown'); };
+    if (!w.isVisible()) place();
+    const go = () => { if (!alive()) return; shownAt = Date.now(); w.show(); w.focus(); try { if (process.platform === 'darwin') require('electron').app.dock?.show(); } catch {} w.webContents.send('quick:shown', { mode }); };
     if (w.webContents.isLoading()) w.webContents.once('did-finish-load', go); else go();
   }
   function hide() { if (alive() && w.isVisible()) { hiddenAt = Date.now(); try { const [x, y] = w.getPosition(); pos = { x, y }; } catch {} w.hide(); } }
   const isVisible = () => alive() && w.isVisible();
   // Clicking the tray icon while the window is open first blurs it (it hides), then the click arrives: that click means "close", not "open again".
-  function toggle() { if (isVisible()) hide(); else if (Date.now() - hiddenAt > 350) show(); }
+  // With the window open on the other tab, the shortcut switches to its tab instead of closing the window.
+  function toggle(on) {
+    const want = on === 'search' ? 'search' : 'chat';
+    if (isVisible()) { if (on && want !== mode) show(want); else hide(); } else if (Date.now() - hiddenAt > 350) show(want);
+  }
+  const setMode = (m) => { mode = m === 'search' ? 'search' : 'chat'; };
   function resize(mode) {
     if (!alive()) return;
     const h = mode === 'chips' ? WITH_CHIPS : mode ? EXPANDED : COLLAPSED;
@@ -52,7 +60,7 @@ function createQuick({ BrowserWindow, screen, isDev, nativeTheme }) {
   /** While a task is running the window should not vanish when it loses focus. */
   function keepOpen(on) { if (alive()) w.__hideOnBlur = !on; }
 
-  return { show, hide, toggle, resize, isVisible, keepOpen, get window() { return alive() ? w : null; } };
+  return { show, hide, toggle, resize, isVisible, keepOpen, setMode, get window() { return alive() ? w : null; } };
 }
 
 module.exports = { createQuick };

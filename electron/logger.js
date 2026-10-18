@@ -11,7 +11,13 @@ function redactString(s) {
   return String(s)
     .replace(/Bearer\s+[A-Za-z0-9._\-~+/=]{8,}/gi, 'Bearer ***')
     .replace(/\b(sk|pk|rk|gsk|xai|hf)[-_][A-Za-z0-9_\-]{12,}/g, '$1-***')
-    .replace(/\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g, '***:***');
+    .replace(/\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g, '***:***')
+    .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, '$1_***')
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_***')
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***')
+    .replace(/\bAIza[0-9A-Za-z_-]{35}/g, 'AIza***')
+    .replace(/\bxox[abprs]-[A-Za-z0-9-]{8,}/g, 'xox*-***')
+    .replace(/\b(x-api-key|api-key|x-goog-api-key)(["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi, '$1$2***');
 }
 function clean(v, depth = 0) {
   if (v == null) return v;

@@ -42,77 +42,9 @@ function Editor({ skill, projects, onClose, onSaved }) {
   );
 }
 
-function Hub({ onClose, onInstalled }) {
-  const [source, setSource] = useState('clawhub');
-  const [q, setQ] = useState('');
-  const [items, setItems] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const [done, setDone] = useState({});
-  const [view, setView] = useState(null); // { item, text }
-  const [working, setWorking] = useState('');
-  const run = async (src, query) => {
-    setBusy(true); setErr('');
-    const r = await api.skillHubSearch({ source: src, query });
-    setBusy(false);
-    if (!r.ok) { setItems([]); return setErr(r.error); }
-    setItems(r.items);
-  };
-  useEffect(() => { run(source, ''); api.skillHubInstalled().then(setDone).catch(() => {}); }, [source]);
-  const key = (it) => it.source + ':' + it.id;
-  const preview = async (it) => { setView({ item: it, text: 'Loading…' }); const r = await api.skillHubPreview({ source: it.source, id: it.id }); setView({ item: it, text: r.ok ? r.text : r.error }); };
-  const install = async (it) => {
-    setWorking(key(it)); setErr('');
-    const r = await api.skillHubInstall(it);
-    setWorking('');
-    if (!r.ok) return setErr(r.error);
-    setDone((d) => ({ ...d, [key(it)]: r.slug }));
-    onInstalled(`Installed "${r.name}".`);
-  };
-  return (
-    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal wide">
-        <h2>Find skills</h2>
-        <div className="seg" style={{ marginBottom: 10 }}>
-          <button className={source === 'clawhub' ? 'on' : ''} onClick={() => setSource('clawhub')}>OpenClaw · ClawHub</button>
-          <button className={source === 'hermes' ? 'on' : ''} onClick={() => setSource('hermes')}>Hermes Agent</button>
-        </div>
-        <form onSubmit={(e) => { e.preventDefault(); run(source, q); }} style={{ display: 'flex', gap: 8 }}>
-          <input style={{ flex: 1 }} autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder={source === 'clawhub' ? 'Search ClawHub (for example: calendar, github, notes)' : 'Search Hermes skills (for example: git, research)'} />
-          <button className="primary" disabled={busy}>Search</button>
-        </form>
-        <small className="muted" style={{ display: 'block', margin: '6px 0' }}>{q ? 'Results' : source === 'clawhub' ? 'Trending on ClawHub' : 'Official Hermes skills'}. Skills are instructions written by other people: open Preview and read one before you install it. Scripts inside a skill only run if you approve them.</small>
-        {err && <small className="hint err">{err}</small>}
-        <div className="sched-list" style={{ maxHeight: 360, overflowY: 'auto' }}>
-          {busy && <div className="muted pad">Searching…</div>}
-          {!busy && !err && !items.length && <div className="muted pad">Nothing found.</div>}
-          {items.map((it) => (
-            <div key={key(it)} className="sched-row">
-              <div className="sched-main">
-                <div className="sched-name">{it.name}{it.version ? <span className="sched-badge">v{it.version}</span> : null}{it.category ? <span className="sched-badge">{it.category}</span> : null}</div>
-                <div className="sched-sub">{it.summary || 'No description'}{it.author ? ` · ${it.author}` : ''}</div>
-              </div>
-              <button onClick={() => preview(it)}>Preview</button>
-              {done[key(it)] ? <button disabled>Installed</button> : <button className="primary" disabled={working === key(it)} onClick={() => install(it)}>{working === key(it) ? 'Installing…' : 'Install'}</button>}
-            </div>
-          ))}
-        </div>
-        {view && (
-          <div style={{ marginTop: 10 }}>
-            <b style={{ fontSize: 12 }}>{view.item.name} · SKILL.md</b>
-            <pre style={{ maxHeight: 200, overflow: 'auto', fontSize: 12, whiteSpace: 'pre-wrap', margin: '4px 0 0', padding: 8, border: '1px solid var(--border)', borderRadius: 8 }}>{view.text}</pre>
-          </div>
-        )}
-        <div className="actions-row"><span style={{ flex: 1 }} /><button onClick={onClose}>Close</button></div>
-      </div>
-    </div>
-  );
-}
-
 export default function SkillsView({ projects = [] }) {
   const [list, setList] = useState([]);
   const [edit, setEdit] = useState(null);
-  const [hub, setHub] = useState(false);
   const [msg, setMsg] = useState('');
   const folders = projects.filter((p) => p.folder);
   const load = async () => {
@@ -135,7 +67,6 @@ export default function SkillsView({ projects = [] }) {
       <div className="page-head">
         <h1>Skills</h1>
         <div className="row" style={{ gap: 8, flex: 'none' }}>
-          <button onClick={() => setHub(true)}>Find skills</button>
           <button onClick={doImport}>Import…</button>
           <button onClick={() => api.skillsReveal()}>Open folder</button>
           <button className="primary-btn" onClick={() => setEdit(blank())}><Icon name="plus" size={15} /> New skill</button>
@@ -157,14 +88,13 @@ export default function SkillsView({ projects = [] }) {
                 <div className="sched-name">{sk.name}{sk.byAgent && <span className="sched-badge" title="Written by Artemis">learned</span>}{sk.source === 'project' && <span className="sched-badge">{sk.projectName || 'project'}</span>}</div>
                 <div className="sched-sub">{sk.description}</div>
               </div>
-              <button className="icon-btn" title="Edit" onClick={() => open(sk)}><Icon name="pencil" size={15} /></button>
-              <button className="icon-btn" title="Delete" onClick={() => askConfirm({ title: 'Delete skill', message: `Delete the skill "${sk.name}"?`, confirmLabel: 'Delete', danger: true }).then((ok) => ok && api.skillsDelete(sk.name, sk.projectFolder).then(load))}><Icon name="trash" size={15} /></button>
+              <button className="icon-btn" title="Edit" aria-label="Edit" onClick={() => open(sk)}><Icon name="pencil" size={15} /></button>
+              <button className="icon-btn" title="Delete" aria-label="Delete" onClick={() => askConfirm({ title: 'Delete skill', message: `Delete the skill "${sk.name}"?`, confirmLabel: 'Delete', danger: true }).then((ok) => ok && api.skillsDelete(sk.name, sk.projectFolder).then(load))}><Icon name="trash" size={15} /></button>
               <label className="switch" title={sk.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={sk.enabled} onChange={(e) => api.skillsToggle(sk.name, e.target.checked, sk.projectFolder).then(load)} /><i /></label>
             </div>
           ))}
         </div>
       )}
-      {hub && <Hub onClose={() => setHub(false)} onInstalled={(m) => { setMsg(m); load(); }} />}
       {edit && <Editor skill={edit} projects={projects} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
     </div>
   );

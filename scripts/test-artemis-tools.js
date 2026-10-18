@@ -34,6 +34,11 @@ const post = (port, body, { token = 'tok', host, origin, method = 'POST', path =
   const call = (name, args) => tools.find((x) => x.name === 'artemis_' + name).run(args || {});
 
   assert.ok(tools.every((x) => x.name.startsWith('artemis_') && x.inputSchema && x.description));
+  // lock: an outside app can lock Artemis (never unlock it); a missing password is an error, not a silent success
+  { const mk = (lockNow) => buildArtemisTools({ control, getSettings: () => settings, applySettings: () => {}, notes, term, skills: () => [], confirm: async () => true, lockNow }).find((x) => x.name === 'artemis_lock');
+    assert.deepStrictEqual(await mk(() => ({ ok: true })).run({}), { locked: true });
+    await assert.rejects(() => mk(() => ({ ok: false, error: 'Set a password first.' })).run({}), /Set a password first/);
+    assert.ok(!tools.some((x) => x.name === 'artemis_unlock'), 'there is no unlock tool'); }
   // settings: allowed, validated, and nothing dangerous
   await call('set_theme', { theme: 'light' }); assert.deepStrictEqual(saved.pop(), { theme: 'light' });
   await assert.rejects(() => call('set_theme', { theme: 'neon' }));
@@ -62,6 +67,12 @@ const post = (port, body, { token = 'tok', host, origin, method = 'POST', path =
   const asks2 = []; const t2 = buildArtemisTools({ control, getSettings: () => settings, applySettings() {}, notes, term, skills: () => [], confirm: async (a) => { asks2.push(a); return 'grant'; } });
   const run2 = (n, a) => t2.find((x) => x.name === 'artemis_' + n).run(a);
   await run2('terminal_run', { command: 'a' }); await run2('terminal_run', { command: 'b' }); assert.strictEqual(asks2.length, 1);
+  // the grant survives a rebuild of the tool list (main rebuilds it per request)
+  const t3 = buildArtemisTools({ control, getSettings: () => settings, applySettings() {}, notes, term, skills: () => [], confirm: async (a) => { asks2.push(a); return 'once'; } });
+  await t3.find((x) => x.name === 'artemis_terminal_run').run({ command: 'c' }); assert.strictEqual(asks2.length, 1, 'grant persists across rebuilds');
+  // injected grants stay separate
+  const t4 = buildArtemisTools({ grants: new Map(), control, getSettings: () => settings, applySettings() {}, notes, term, skills: () => [], confirm: async (a) => { asks2.push(a); return 'once'; } });
+  await t4.find((x) => x.name === 'artemis_terminal_run').run({ command: 'd' }); assert.strictEqual(asks2.length, 2);
 
   // the HTTP server
   const srv = createMcpServer({ getToken: () => 'tok', tools });
@@ -96,10 +107,10 @@ const post = (port, body, { token = 'tok', host, origin, method = 'POST', path =
   const tools = require('../electron/tools');
   const { buildArtemisTools } = require('../electron/artemis-tools');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-fs-'));
-  const asked = [];
+  const asked = []; const keys = [];
   const t = buildArtemisTools({
     getSettings: () => ({ shellEnabled: true }), control: {}, applySettings() {}, notes: {}, term: {}, skills: () => [],
-    confirm: async (a) => { asked.push(a.title); return 'once'; },
+    confirm: async (a) => { asked.push(a.title); keys.push(a.key); return 'once'; },
     files: {
       defs: () => tools.definitions({ hasFolder: true, shellEnabled: true }).filter((x) => ['list_dir', 'read_file', 'write_file', 'edit_file', 'delete_file'].includes(x.function.name)),
       projects: () => [{ name: 'Demo', folder: dir }],
@@ -116,5 +127,13 @@ const post = (port, body, { token = 'tok', host, origin, method = 'POST', path =
   assert.ok(String(rd).includes('hello'), 'read works without naming the only project');
   await assert.rejects(() => by('fs_read_file').run({ project: 'Nope', path: 'a.txt' }), /unknown project/);
   await assert.rejects(() => by('fs_read_file').run({ path: '../../etc/hosts' }), /./, 'cannot leave the project folder');
+  assert.ok(keys.includes('fs:write') && asked.includes('Let an outside app change your files?'), 'a write uses the write prompt');
+  // reading outside the project: allowed after approval, with its own read prompt and key
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-out-'));
+  fs.writeFileSync(path.join(other, 'b.txt'), 'outside text');
+  asked.length = 0; keys.length = 0;
+  const out = await by('fs_read_file').run({ path: path.join(other, 'b.txt') });
+  assert.ok(String(out).includes('outside text'), 'reads any file after approval');
+  assert.deepStrictEqual(keys, ['fs:read']); assert.deepStrictEqual(asked, ['Let an outside app read files on your computer?']);
   console.log('artemis fs tools ok');
 })().catch((e) => { console.error('FAILED', e); process.exit(1); });

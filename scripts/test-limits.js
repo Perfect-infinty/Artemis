@@ -11,4 +11,7 @@ r = checkLimits(list, { dailyTokenLimit: 0, monthlyTokenLimit: '' }, now); asser
 const sp = [{ t: at(13, 9), model: 'anthropic/claude-opus-5.5', prompt: 1e6, completion: 100000 }, { t: at(13, 10), model: 'unknown/x', prompt: 5e6, completion: 0 }];
 r = checkLimits(sp, { dailyUsdLimit: 5 }, now, { 'anthropic/claude-opus-5.5': [4, 20] }); assert.ok(/Daily spending limit reached \(\$6\.00 of \$5\.00\)/.test(r.blocked), r.blocked); // 1M*4 + 0.1M*20 = $6
 r = checkLimits(sp, { dailyUsdLimit: 7 }, now, { 'anthropic/claude-opus-5.5': [4, 20] }); assert.ok(r.warn && !r.blocked);
+// cache reads at 10%, cache writes at 125% of the input price
+const { costOf } = require('../electron/limits.js');
+assert.ok(Math.abs(costOf({ model: 'm', prompt: 1e6, cached: 5e5, cacheWrite: 2e5, completion: 0 }, { m: [1, 0] }) - (0.3 + 0.05 + 0.25)) < 1e-9);
 console.log('limits: all tests passed');

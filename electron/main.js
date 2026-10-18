@@ -6,9 +6,17 @@ const os = require('os');
 const http = require('http');
 const crypto = require('crypto');
 const { runAgent, summarizeAll } = require('./agent');
+const { createBrowser } = require('./browser');
 const brainsLib = require('./brains');
 const { createSentinelWidget } = require('./sentinel-widget');
+const { pttAccelerator } = require('./ptt-accel');
 const { createLogger } = require('./logger');
+const { createLock } = require('./lock');
+const { createSpeaker } = require('./speaker');
+const { createVoiceGate } = require('./voice-gate');
+// ---------- app lock: while locked, IPC calls that act or show content are refused (the list is in electron/lock.js) ----------
+let lockGuard = () => true; // replaced as soon as the lock exists (further down)
+{ const handle = ipcMain.handle.bind(ipcMain); ipcMain.handle = (ch, fn) => handle(ch, (e, ...a) => { if (!lockGuard(ch)) throw new Error('Artemis is locked.'); return fn(e, ...a); }); }
 // ---------- app log (file + Logs page) ----------
 const logger = createLogger({
   dir: path.join(app.getPath('home'), '.artemis', 'logs'),
@@ -25,7 +33,6 @@ const mediaGen = require('./media');
 const { createComputer } = require('./computer');
 const { createFloat } = require('./float');
 const { createQuick } = require('./quick');
-const { createPalette } = require('./palette');
 const { createRemote } = require('./remote');
 const { createMcpManager, parseImport } = require('./mcp');
 const tools = require('./tools');
@@ -52,32 +59,76 @@ try {
   }
 } catch {}
 const dataFile = (name) => path.join(app.getPath('userData'), `${name}.json`);
-function readJson(name, fallback) {
-  try { return JSON.parse(fs.readFileSync(dataFile(name), 'utf8')); } catch (e) { if (e && e.code !== 'ENOENT') logger.error('store', `Could not read ${name}.json: ${e.message}`); return fallback; }
+// Stores whose file did not parse: name -> where the bad file was moved. store:set for them is refused until the user has been told.
+const corruptStores = new Map();
+let corruptNotified = false;
+function quarantine(name, err) {
+  const file = dataFile(name);
+  const dest = `${file}.corrupt-${Date.now()}`;
+  try { fs.renameSync(file, dest); } catch { try { fs.copyFileSync(file, dest); } catch {} }
+  corruptStores.set(name, dest);
+  logger.error('store', `${name}.json is corrupt (${err.message}); kept as ${path.basename(dest)}`);
+  setTimeout(notifyCorrupt, 0);
 }
+async function notifyCorrupt() {
+  if (corruptNotified || !corruptStores.size || !app.isReady()) return;
+  corruptNotified = 'pending';
+  const lines = [...corruptStores].map(([n, p]) => `${n}.json → ${path.basename(p)}`).join('\n');
+  try {
+    const opts = { type: 'warning', buttons: ['OK', 'Show in Finder'], defaultId: 0, noLink: true, message: 'Some saved data could not be read',
+      detail: `These files were damaged and have been set aside so nothing is overwritten:\n${lines}\n\nArtemis starts them empty. A recent copy of your chats may be in chats.json.bak in the same folder.` };
+    const r = (win && !win.isDestroyed()) ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+    if (r.response === 1) shell.showItemInFolder([...corruptStores.values()][0]);
+  } catch {}
+  corruptNotified = true;
+}
+function readJson(name, fallback) {
+  let raw;
+  try { raw = fs.readFileSync(dataFile(name), 'utf8'); } catch (e) { if (e && e.code !== 'ENOENT') logger.error('store', `Could not read ${name}.json: ${e.message}`); return fallback; }
+  try { return JSON.parse(raw); } catch (e) {
+    if (name in STORES && !corruptStores.has(name)) quarantine(name, e);
+    else logger.error('store', `Could not read ${name}.json: ${e.message}`);
+    return fallback;
+  }
+}
+const BAK_EVERY = 10 * 60 * 1000;
 function writeJson(name, data) {
   const file = dataFile(name);
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (name === 'chats') { // rolling backup, at most one copy per 10 minutes
+    try { const bak = file + '.bak'; let age = Infinity; try { age = Date.now() - fs.statSync(bak).mtimeMs; } catch {} if (age > BAK_EVERY && fs.existsSync(file)) fs.copyFileSync(file, bak); } catch (e) { logger.warn('store', 'chats backup failed: ' + e.message); }
+  }
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data));
+  const fd = fs.openSync(tmp, 'w');
+  try { fs.writeSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, file);
 }
 const STORES = { chats: [], projects: [], memory: [] };
 
 // ---------- usage stats (tokens per request; no message content is stored) ----------
+// Kept in memory (loaded once) and written at most every 2 s, plus on quit.
 const USAGE_MAX = 20000;
+let usageList = null, usageTimer = null;
+const getUsage = () => { if (!usageList) { const l = readJson('usage', []); usageList = Array.isArray(l) ? l : []; } return usageList; };
+function flushUsage() {
+  if (usageTimer) { clearTimeout(usageTimer); usageTimer = null; }
+  if (!usageList) return;
+  try { writeJson('usage', usageList); } catch (e) { logger.warn('usage', 'Could not save usage: ' + e.message); }
+}
+function setUsage(list) { usageList = Array.isArray(list) ? list : []; flushUsage(); }
 function recordUsage(entry) {
   try {
-    const list = readJson('usage', []);
+    const list = getUsage();
     list.push(entry);
+    if (list.length > USAGE_MAX) list.splice(0, list.length - USAGE_MAX);
     logger.debug('usage', `${entry.model} · ${entry.prompt || 0} in / ${entry.completion || 0} out${entry.source ? ' · ' + entry.source : ''}`);
-    writeJson('usage', list.length > USAGE_MAX ? list.slice(-USAGE_MAX) : list);
+    if (!usageTimer) usageTimer = setTimeout(flushUsage, 2000);
   } catch {}
 }
 const { checkLimits } = require('./limits');
 const providersLib = require('./providers');
+const titlesLib = require('./titles');
 const { createSkills } = require('./skills');
-const { createSkillHub } = require('./skillhub');
 const { createAgents } = require('./subagents');
 const { createMake, ZONES: MAKE_ZONES, cleanZone: cleanMakeZone, validZone: validMakeZone } = require('./make');
 const chatSearch = require('./chatsearch');
@@ -86,7 +137,7 @@ const { createPermissions } = require('./permissions');
 const readProviders = () => { const l = readJson('providers', []); const list = Array.isArray(l) ? l : []; providersLib.registerHeaders(list); return list; };
 const readProviderKeys = () => readJson('providerkeys', {});
 const getProviderKey = (id) => decStr(readProviderKeys()[id]);
-const limitState = () => checkLimits(readJson('usage', []), getSettings(), Date.now(), providersLib.priceMap(readProviders()));
+const limitState = () => checkLimits(getUsage(), getSettings(), Date.now(), providersLib.priceMap(readProviders()));
 const skills = createSkills({
   userDir: path.join(app.getPath('userData'), 'skills'),
   getDisabled: () => getSettings().disabledSkills || [],
@@ -120,10 +171,10 @@ const oauthCallbackServer = http.createServer((req, res) => {
 });
 oauthCallbackServer.listen(0, '127.0.0.1');
 let shortcutError = '';
+let shortcutErrors = {}; // per setting key, shown under each field in Settings → General
 let quitting = false;
 let tray = null;
 let quick = null;
-let palette = null;
 
 const DEFAULT_SETTINGS = {
   model: '', // set by picking a model from a provider; empty = the first model of the first enabled provider
@@ -147,6 +198,7 @@ const DEFAULT_SETTINGS = {
   webEnabled: true,
   shellEnabled: true,
   computerEnabled: true,
+  browserTools: true, // the agent can drive the integrated browser
   telegramEnabled: false,
   telegramChatId: '',
   remoteFolder: '',
@@ -155,8 +207,12 @@ const DEFAULT_SETTINGS = {
   remoteAllowDangerous: true,
   telegramTokenEnc: null,
   connectorsEnabled: true,
-  quickChatShortcut: 'CommandOrControl+Shift+Space',
-  paletteShortcut: 'CommandOrControl+K', // opens Artemis and its command palette from any app; empty = off
+  quickChatShortcut: 'CommandOrControl+Shift+Space', // global: opens or hides the Quick window on its Chat tab
+  quickSearchShortcut: '', // global: opens the Quick window on its Search tab; empty = off
+  paletteShortcut: 'CommandOrControl+K', // in the main window only (matched in the renderer); empty = off
+  paletteFromQuickShortcut: false, // the Quick chat shortcut opens the command palette while the Artemis window is in front
+  sentinelShortcut: 'CommandOrControl+Shift+A', // global: turns Sentinel (voice mode) on or off without bringing the window up; empty = off
+  lockShortcut: 'CommandOrControl+Alt+Shift+L', // global: locks Artemis (Settings → Security); empty = off
   closeToTray: true,
   makeEnabled: true,
   voiceSttProvider: '',
@@ -164,7 +220,7 @@ const DEFAULT_SETTINGS = {
   voiceLanguage: 'auto',
   voiceAutoRead: false,
   connectorsLazy: true, fullFileAccess: true, toolsLazy: true, mcpServerEnabled: false, mcpServerPort: 8788, mcpTokenEnc: null,
-  mcpAlwaysAllow: false, notesAi: true, sentinelPreload: false, sentinelAuto: false, sentinelInterrupt: false, sentinelNameOnly: true, sentinelSensitivity: 'normal',
+  mcpAlwaysAllow: false, notesAi: true, sentinelPreload: false, sentinelAuto: false, sentinelPtt: '', sentinelInterrupt: false, sentinelStopWords: false, sentinelHideInApp: true, sentinelNameOnly: true, sentinelSensitivity: 'normal',
   sentinelModel: '', // empty = the default model; a fast model makes voice answers start sooner,
   sentinelPos: null,
   micDeviceId: '',
@@ -172,6 +228,9 @@ const DEFAULT_SETTINGS = {
   voiceName: '',
   voiceRate: 1,
   ttsEngine: 'system', ttsUrl: '', ttsModel: '', ttsVoice: '', ttsVoiceEn: '',
+  ttsVoices: {}, // older Kokoro voice per reply language ({ es: 'ef_dora' }); read by langMapFrom when voiceLangMap has no entry
+  voiceLangMap: {}, // engine per reply language ({ tr: { engine: 'piper', url: 'http://localhost:5100', voice: 'tr_TR-dfki-medium' } }); see src/lib/lang.mjs
+  cbUrl: '', cbVoice: '', cbExaggeration: 0.5, cbCfg: 0.5, cbTemperature: 0.8, cbSpeed: 1, cbHybrid: false,
   defaultBrain: '',
   makeZone: 'eu1.make.com',
   launchAtLogin: false,
@@ -183,6 +242,9 @@ const DEFAULT_SETTINGS = {
   profileAbout: '',
   profileLocation: '', // where the user is (city, country); used for "near me" questions
   chatSearchEnabled: true,
+  autoTitles: true, // name chats from their topic after the first reply (and again as the topic drifts)
+  titleModel: '', // empty = the chat's own model
+  scheduleModel: '', // model for scheduled tasks that have none of their own; empty = the default model
   disabledSkills: []
 };
 const getSettings = () => ({ ...DEFAULT_SETTINGS, ...readJson('settings', {}) });
@@ -204,7 +266,25 @@ const getSecret = (name) => decStr(getSettings()[SECRET_FIELDS[name]]) || (name 
 const setSecret = (name, value) => writeJson('settings', { ...getSettings(), [SECRET_FIELDS[name]]: encStr(value) });
 const saveSettings = (patch) => writeJson('settings', { ...getSettings(), ...patch });
 
-const publicSettings = () => ({ ...getSettings(), telegramTokenEnc: undefined, makeTokenEnc: undefined, mcpTokenEnc: undefined, hasMakeToken: !!getSecret('makeToken'), hasApiKey: readProviders().some((p) => p.enabled !== false && (p.models || []).length && (!p.needsKey || getProviderKey(p.id))), hasTelegramToken: !!getSecret('telegramToken'), shortcutError });
+const publicSettings = () => ({ ...getSettings(), telegramTokenEnc: undefined, makeTokenEnc: undefined, mcpTokenEnc: undefined, hasMakeToken: !!getSecret('makeToken'), hasApiKey: readProviders().some((p) => p.enabled !== false && (p.models || []).length && (!p.needsKey || getProviderKey(p.id))), hasTelegramToken: !!getSecret('telegramToken'), shortcutError, shortcutErrors });
+
+// ---------- app lock, voice recognition, unauthorized-access alerts (electron/lock.js, speaker.js, voice-gate.js) ----------
+const lockAuthWaiting = new Map(); // id -> resolve(password | null): a password asked from the window (to approve a sensitive action)
+const snapWaiting = new Map(); // id -> resolve(dataUrl | null): a webcam frame asked from the window (for the alert photo)
+const lock = createLock({
+  read: () => readJson('lock', {}), write: (d) => writeJson('lock', d),
+  log: (lv, m) => logger[lv === 'warn' ? 'warn' : 'info']('lock', m),
+  touchId: {
+    available: () => { try { return process.platform === 'darwin' && systemPreferences.canPromptTouchID(); } catch { return false; } },
+    prompt: (why) => systemPreferences.promptTouchID(why)
+  },
+  onState: (st) => onLockState(st),
+  onAlert: (info) => { onLockAlert(info).catch((e) => logger.warn('lock', 'The alert failed: ' + ((e && e.message) || e))); },
+  askPassword: (reason) => askPasswordInWindow(reason)
+});
+lockGuard = (ch) => lock.guard(ch);
+const speaker = createSpeaker({ fs, path, dir: () => path.join(app.getPath('userData'), 'speaker'), safeStorage, log: (lv, m) => logger[lv === 'warn' ? 'warn' : 'info']('speaker', m) });
+const voiceGate = createVoiceGate({ lock, speaker, log: (lv, m) => logger[lv === 'warn' ? 'warn' : 'info']('speaker', m) });
 
 // ---------- themes (JSON palettes, so a new theme needs no rebuild) ----------
 /** The project folder of the newest chat's project: where a project theme file would sit. */
@@ -233,34 +313,15 @@ const broadcastTheme = () => {
   for (const w of BrowserWindow.getAllWindows()) { try { w.webContents.send('theme:changed'); } catch {} }
 };
 
-// ---------- pencere ----------
+// ---------- window ----------
 let win;
-let browserView = null;
-let browserRect = null; // set by the renderer: where the empty browser panel sits in the window
-function browserBounds() {
-  if (!win || win.isDestroyed()) return null;
-  if (browserRect) return browserRect;
-  const { width, height } = win.getContentBounds();
-  return { x: Math.max(0, width - 460), y: 96, width: Math.min(460, width), height: Math.max(100, height - 96) };
-}
-function showBrowser(url) {
-  if (!win || win.isDestroyed()) return false;
-  if (!browserView) {
-    const { WebContentsView } = require('electron');
-    browserView = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true } });
-    browserView.webContents.setWindowOpenHandler(({ url: next }) => { win.webContents.send('browser:request', next); return { action: 'deny' }; });
-    const report = (_e, next) => { if (/^https?:/i.test(next || '') && win && !win.isDestroyed()) win.webContents.send('browser:url', next); };
-    browserView.webContents.on('will-navigate', report);
-    browserView.webContents.on('did-navigate', report);
-    browserView.webContents.on('did-navigate-in-page', report);
-    win.contentView.addChildView(browserView);
-  }
-  const b = browserBounds(); if (b) browserView.setBounds(b);
-  if (url) browserView.webContents.loadURL(url);
-  browserView.setVisible(true);
-  return true;
-}
-function hideBrowser() { if (browserView) browserView.setVisible(false); browserRect = null; }
+// The integrated browser: tabs on their own persistent session, laid over the renderer's browser panel (see electron/browser.js)
+const browser = createBrowser({
+  session, getWebContentsView: () => require('electron').WebContentsView, getWin: () => win, isDev: IS_DEV,
+  downloadsDir: () => { try { return app.getPath('downloads'); } catch { return ''; } },
+  emit: (ch, p) => { try { if (win && !win.isDestroyed()) win.webContents.send(ch, p); } catch {} },
+  log: { warn: (area, m) => { try { logger.warn(area, m); } catch {} } }
+});
 function createWindow() {
   const isMac = process.platform === 'darwin';
   win = new BrowserWindow({
@@ -284,8 +345,12 @@ function createWindow() {
   });
   const keepDock = () => { if (process.platform === 'darwin' && app.dock) { try { app.dock.show(); } catch {} } };
   win.on('minimize', keepDock); win.on('hide', keepDock); win.on('restore', keepDock); win.on('show', keepDock);
-  win.on('resize', () => { const b = browserBounds(); if (browserView && b) browserView.setBounds(b); });
-  win.on('closed', () => { browserView?.webContents.close(); browserView = null; win = null; });
+  win.on('resize', () => browser.onWindowResize());
+  win.webContents.on('devtools-opened', () => { if (lock.isLocked()) { try { win.webContents.closeDevTools(); } catch {} } });
+  win.on('closed', () => { browser.destroy(); win = null; });
+  // push-to-talk is a global shortcut only while the window is not in front (hold-to-talk in the window needs the key events)
+  win.on('focus', () => syncPttShortcut()); win.on('blur', () => syncPttShortcut());
+  for (const ev of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore']) win.on(ev, syncSentinelSoon);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url);
@@ -293,14 +358,19 @@ function createWindow() {
   });
   win.webContents.on('will-navigate', (e, url) => {
     const cur = (() => { try { return win.webContents.getURL().split('#')[0]; } catch { return ''; } })();
-    const internal = url.split('#')[0] === cur || url.startsWith('http://localhost:5173'); // a dropped file must not replace the app page
+    const internal = url.split('#')[0] === cur || (IS_DEV && url.startsWith('http://localhost:5173/')); // a dropped file must not replace the app page
     if (!internal) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); }
   });
 }
 
 // ---------- IPC: storage / settings ----------
 ipcMain.handle('store:get', (_e, name) => (name in STORES ? readJson(name, STORES[name]) : null));
-ipcMain.handle('store:set', (_e, name, data) => { if (name in STORES) writeJson(name, data); return true; });
+ipcMain.handle('store:set', (_e, name, data) => {
+  if (!(name in STORES)) return true;
+  if (corruptStores.has(name) && corruptNotified !== true) { notifyCorrupt(); return false; } // keep the damaged file's slot untouched until the user knows
+  writeJson(name, data);
+  return true;
+});
 ipcMain.handle('settings:get', () => publicSettings());
 ipcMain.handle('settings:set', async (_e, patch) => {
   // never let the renderer overwrite stored secrets: undefined values survive IPC and would wipe them
@@ -310,12 +380,15 @@ ipcMain.handle('settings:set', async (_e, patch) => {
   const before = getSettings();
   saveSettings(rest);
   if (rest.theme) nativeThemeFor();
+  if (('theme' in rest && rest.theme !== before.theme) || ('textSize' in rest && rest.textSize !== before.textSize)) broadcastTheme();
   // Restart the Telegram bot only when something about them changed, and never make the Save button wait for it
   // (stopping Telegram long-polling or a busy port can take a long time).
   const remoteKeys = ['telegramEnabled'];
   const remoteChanged = (typeof telegramToken === 'string' && telegramToken.trim()) || remoteKeys.some((k) => k in rest && String(rest[k]) !== String(before[k]));
   if (remoteChanged) remote.reconfigure().catch((e) => logger.error('app', 'Phone services restart failed: ' + ((e && e.message) || e)));
-  try { if (('quickChatShortcut' in rest && rest.quickChatShortcut !== before.quickChatShortcut) || ('paletteShortcut' in rest && rest.paletteShortcut !== before.paletteShortcut)) applyShortcut(); } catch (e) { logger.error('app', 'Shortcut failed: ' + ((e && e.message) || e)); }
+  try {
+    if (SHORTCUT_KEYS.some((k) => k in rest && rest[k] !== before[k])) { applyShortcut(); buildAppMenu(); rebuildTray?.(); }
+  } catch (e) { logger.error('app', 'Shortcut failed: ' + ((e && e.message) || e)); }
   try { if ('launchAtLogin' in rest && rest.launchAtLogin !== before.launchAtLogin) applyLoginItem(); } catch (e) { logger.error('app', 'Login item failed: ' + ((e && e.message) || e)); }
   logger.info('app', 'Settings saved', { keys: Object.keys(rest).length, phoneRestart: !!remoteChanged });
   return publicSettings();
@@ -368,13 +441,24 @@ ipcMain.handle('dialog:folder', async () => {
 // ---------- IPC: chat ----------
 const runs = new Map();       // requestId -> AbortController
 const approvals = new Map();  // toolId -> resolve(bool)
+const approvalMeta = new Map(); // toolId -> { name, category }: what the approval is for (Touch ID is asked for the sensitive ones)
 
-ipcMain.handle('tool:decision', (_e, toolId, ok) => { decideTool(toolId, ok); });
+ipcMain.handle('tool:decision', async (_e, toolId, ok) => {
+  if (ok) {
+    const r = await lock.requireSensitive(approvalMeta.get(toolId));
+    if (!r.ok) { logger.info('lock', 'A sensitive action was not confirmed' + (r.error ? ': ' + r.error : '')); decideTool(toolId, false); return { ok: false, denied: true, error: r.error || 'Not confirmed.' }; }
+  }
+  decideTool(toolId, ok);
+});
 
+/** Compares memory entries by their words only, so "Use X." and "use x" count as the same entry. */
+const memKey = (t) => String(t || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, 500);
 const memoryApi = (notify) => ({
   list: () => readJson('memory', []),
   add: (text) => {
     const list = readJson('memory', []);
+    const same = list.find((m) => memKey(m.text) === memKey(text));
+    if (same) return { ...same, duplicate: true }; // the model re-saving an entry it already has must not add a copy
     const item = { id: Math.random().toString(36).slice(2, 8), text: text.slice(0, 500), createdAt: Date.now() };
     list.push(item); writeJson('memory', list); notify();
     return item;
@@ -402,10 +486,11 @@ ipcMain.handle('artifact:stage', (_e, content, kind) => {
   return `artifact://view/${token}`;
 });
 ipcMain.handle('artifact:save', async (_e, { title, kind, language, content }) => {
+  const parent = BrowserWindow.fromWebContents(_e.sender) || win; // the Sentinel widget saves too: its own dialog, the main window stays in the back
   if (kind === 'spreadsheet') {
     const XLSX = require('xlsx');
     const base = String(title || 'table').replace(/[^\w .-]+/g, '_').slice(0, 60);
-    const r = await dialog.showSaveDialog(win, { defaultPath: `${base}.xlsx`, filters: [{ name: 'Excel', extensions: ['xlsx'] }, { name: 'CSV', extensions: ['csv'] }, { name: 'Excel 97-2003', extensions: ['xls'] }, { name: 'OpenDocument', extensions: ['ods'] }] });
+    const r = await dialog.showSaveDialog(parent, { defaultPath: `${base}.xlsx`, filters: [{ name: 'Excel', extensions: ['xlsx'] }, { name: 'CSV', extensions: ['csv'] }, { name: 'Excel 97-2003', extensions: ['xls'] }, { name: 'OpenDocument', extensions: ['ods'] }] });
     if (r.canceled || !r.filePath) return { canceled: true };
     try {
       const parts = /^## Sheet: /m.test(String(content || '')) ? String(content).split(/^## Sheet: /m).filter(Boolean) : [];
@@ -416,7 +501,7 @@ ipcMain.handle('artifact:save', async (_e, { title, kind, language, content }) =
     } catch (e) { return { ok: false, error: e.message }; }
   }
   const ext = kind === 'html' ? 'html' : kind === 'svg' ? 'svg' : kind === 'markdown' ? 'md' : ({ python: 'py', javascript: 'js', typescript: 'ts', bash: 'sh', json: 'json', css: 'css', java: 'java', go: 'go', rust: 'rs' }[String(language).toLowerCase()] || 'txt');
-  const r = await dialog.showSaveDialog(win, { defaultPath: `${String(title || 'artifact').replace(/[^\w .-]+/g, '_').slice(0, 60)}.${ext}` });
+  const r = await dialog.showSaveDialog(parent, { defaultPath: `${String(title || 'artifact').replace(/[^\w .-]+/g, '_').slice(0, 60)}.${ext}` });
   if (r.canceled || !r.filePath) return { canceled: true };
   fs.writeFileSync(r.filePath, String(content || ''));
   return { ok: true, path: r.filePath };
@@ -425,22 +510,93 @@ ipcMain.handle('artifact:save', async (_e, { title, kind, language, content }) =
 // ---------- Sentinel widget (floating status, tray) ----------
 let sentinelInfo = { state: 'off' };
 let sentinelWidget = null;
+let computerWinWasUp = true; // the computer tool hides the main window while it works; it only comes back if it was up before (Sentinel works with it hidden)
+/** A picture of the Artemis window itself (webContents.capturePage: no Screen Recording permission, works behind other windows).
+ *  A minimized or hidden window is brought back for the capture only and put away again. View only. */
+async function appScreenshot() {
+  if (!win || win.isDestroyed()) throw new Error('The Artemis window is not open.');
+  const wasMin = win.isMinimized();
+  const wasHidden = !win.isVisible() && !wasMin;
+  if (wasMin) win.restore(); else if (wasHidden) win.showInactive();
+  if (wasMin || wasHidden) await new Promise((r) => setTimeout(r, 450));
+  try {
+    let img = await win.webContents.capturePage();
+    if (!img || img.isEmpty()) throw new Error('Could not capture the Artemis window.');
+    const { width, height } = img.getSize();
+    const k = Math.min(1, 1024 / Math.max(width, height, 1));
+    if (k < 1) img = img.resize({ width: Math.max(1, Math.round(width * k)), height: Math.max(1, Math.round(height * k)) });
+    const s = img.getSize();
+    return { ok: true, text: `Screenshot of the Artemis window itself, ${s.width}x${s.height} pixels. View only: these coordinates do not match the screen, so do not click with them.`, image: 'data:image/jpeg;base64,' + img.toJPEG(80).toString('base64') };
+  } finally {
+    if (!win.isDestroyed()) { if (wasMin) win.minimize(); else if (wasHidden) win.hide(); }
+  }
+}
+
+/** Runs fn (a screen capture) with the Artemis window in view: computer control normally minimizes it or hides it from screenshots. */
+async function withArtemisVisible(fn) {
+  if (!win || win.isDestroyed()) return fn();
+  const wasMin = win.isMinimized();
+  const wasHidden = !win.isVisible() && !wasMin;
+  try { win.setContentProtection(false); } catch {}
+  if (wasMin) win.restore(); else if (wasHidden) win.showInactive();
+  if (!wasMin && !win.isFocused()) { try { win.moveTop(); } catch {} }
+  await new Promise((r) => setTimeout(r, 450));
+  try { return await fn(); }
+  finally {
+    if (!win.isDestroyed()) {
+      if (wasMin) win.minimize(); else if (wasHidden) win.hide();
+      if (!computerWinWasUp && computerRuns > 0) { try { win.setContentProtection(true); } catch {} }
+    }
+  }
+}
+
 const sentinelOn = () => sentinelInfo.state && sentinelInfo.state !== 'off';
+const widgetInfo = () => (lock.isLocked() ? { state: sentinelInfo.state, locked: true } : sentinelInfo); // locked: no text of the conversation in the widget
+// the floating widget duplicates the in-app voice UI, so it hides while the main window is up front
+const appInFront = () => {
+  if (getSettings().sentinelHideInApp === false) return false;
+  try { return !!(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized() && win.isFocused()); } catch { return false; }
+};
+let frontTimer = null;
+const syncSentinelSoon = () => { clearTimeout(frontTimer); frontTimer = setTimeout(() => { try { if (sentinelWidget) syncSentinel(); } catch {} }, 150); };
 function syncSentinel() {
   if (!sentinelWidget) sentinelWidget = createSentinelWidget({ BrowserWindow, screen, isDev: IS_DEV, getPos: () => getSettings().sentinelPos, setPos: (p) => saveSettings({ sentinelPos: p }) });
-  if (sentinelOn() || sentinelInfo.err) { sentinelWidget.show(); sentinelWidget.send('sentinel:state', sentinelInfo); }
+  if ((sentinelOn() || sentinelInfo.err) && !appInFront()) { sentinelWidget.show(); sentinelWidget.send('sentinel:state', widgetInfo()); }
   else sentinelWidget.hide();
   try { rebuildTray && rebuildTray(); } catch {}
 }
 ipcMain.on('sentinel:state', (_e, info) => { sentinelInfo = info && typeof info === 'object' ? info : { state: 'off' }; syncSentinel(); });
 ipcMain.on('sentinel:level', (_e, v) => { sentinelWidget && sentinelWidget.send('sentinel:level', v); });
-ipcMain.on('sentinel:resize', (_e, h, wide) => { sentinelWidget && sentinelWidget.resize(h, wide); });
+ipcMain.on('sentinel:resize', (_e, h, mode, size) => { sentinelWidget && sentinelWidget.resize(h, mode, size); });
+// The widget is a small chat client: it asks the main window's page (which owns the chats) for an artifact, a file preview, or to send
+// a typed message to Sentinel's chat. The main window is never shown or focused for this.
+const widgetAsks = new Map(); let widgetAskSeq = 0;
+ipcMain.handle('sentinel:ask', (_e, what, arg) => new Promise((resolve) => {
+  if (!win || win.isDestroyed() || win.webContents.isLoading()) { resolve(null); return; }
+  const id = ++widgetAskSeq;
+  const t = setTimeout(() => { widgetAsks.delete(id); resolve(null); }, 15000);
+  widgetAsks.set(id, (v) => { clearTimeout(t); resolve(v); });
+  win.webContents.send('sentinel:ask', { id, what: String(what || ''), arg });
+}));
+ipcMain.on('sentinel:answer', (_e, id, value) => { const f = widgetAsks.get(id); if (f) { widgetAsks.delete(id); f(value === undefined ? null : value); } });
+// Voice control of the widget itself: move it to an edge of the screen, or expand / collapse / pin it (handled by the widget page).
+// "Copy that": the clipboard from the main process (navigator.clipboard needs a focused window, and Sentinel works with it in the background).
+ipcMain.handle('sentinel:copy', (_e, text) => { try { require('electron').clipboard.writeText(String(text || '').slice(0, 500000)); return true; } catch { return false; } });
+ipcMain.handle('sentinel:widget', (_e, cmd) => {
+  const c = String(cmd || '');
+  if (!sentinelWidget) return false;
+  if (/^(left|right|up|down|top|bottom|center)$/.test(c)) return sentinelWidget.moveTo(c);
+  if (/^(expand|collapse|pin|unpin)$/.test(c)) { sentinelWidget.send('sentinel:cmd', c); return true; }
+  return false;
+});
 
 // ---------- logs ----------
 
 // ---------- voice ----------
 /** Speech to text with the provider chosen in Settings → Voice. Used by the microphone, Sentinel, Telegram and the phone web chat. */
-const STT_LANG_OK = /^(en|english)/i; // English only
+// The languages offered in Settings → Voice (src/lib/lang.mjs VOICE_LANGS). Whisper reports what it heard as a name ("turkish") or a code.
+const STT_LANGS = { english: 'en', turkish: 'tr', azerbaijani: 'az', russian: 'ru', german: 'de', french: 'fr', spanish: 'es', italian: 'it', portuguese: 'pt', dutch: 'nl', polish: 'pl', ukrainian: 'uk', arabic: 'ar', persian: 'fa', hindi: 'hi', japanese: 'ja', chinese: 'zh', korean: 'ko' };
+const sttLang = (v) => { const s = String(v || '').trim().toLowerCase(); if (STT_LANGS[s]) return STT_LANGS[s]; const c = s.split(/[-_]/)[0]; return Object.values(STT_LANGS).includes(c) ? c : ''; };
 async function transcribeAudio({ audio, mime, language, hint } = {}) {
   try {
     const settings = getSettings();
@@ -451,7 +607,8 @@ async function transcribeAudio({ audio, mime, language, hint } = {}) {
     if (!buf.length) return { ok: false, error: 'Nothing was recorded.' };
     if (buf.length > 24 * 1024 * 1024) return { ok: false, error: 'The recording is too long (limit about 24 MB). Try a shorter message.' };
     const ext = /wav/.test(mime || '') ? 'wav' : /mp4|m4a|aac/.test(mime || '') ? 'mp4' : /mpeg|mp3/.test(mime || '') ? 'mp3' : /ogg|opus/.test(mime || '') ? 'ogg' : 'webm';
-    const fixed = /^en/i.test(String(language || settings.voiceLanguage || '')) ? 'en' : '';
+    const want = String(language || settings.voiceLanguage || '').trim().toLowerCase(); // '' or 'auto' = Whisper detects the language
+    const fixed = /^[a-z]{2,3}$/.test(want) ? want : '';
     const url = providersLib.joinUrl(route.baseUrl, 'audio/transcriptions');
     // one request; verbose = also ask which language was heard
     const once = async (lang, verbose, prompt) => {
@@ -475,23 +632,22 @@ async function transcribeAudio({ audio, mime, language, hint } = {}) {
       logger.error('voice', `Speech-to-text failed HTTP ${res.status}`, { detail });
       return { ok: false, error: `Speech-to-text failed (HTTP ${res.status}): ${typeof detail === 'string' ? detail : JSON.stringify(detail)}.${h}` };
     };
-    const done = (j) => { const text = String((j && j.text) ?? '').trim(); return text ? { ok: true, text } : { ok: false, error: 'No speech was recognised.' }; };
-    if (fixed) { const r = await once(fixed, false, hint); return r.res.ok ? done(r.j) : fail(r); }
-    // Automatic language: a short sentence can be taken for Icelandic or anything else. A prompt in the languages the user speaks
-    // steers it, and a result in some other language is redone as English.
-    const bias = `${hint || ''}Hello, how are you?`;
-    let r = await once('', true, bias);
-    if (!r.res.ok && r.res.status === 400) r = await once('', false, bias); // a server without verbose_json
+    // language = the code of the language that was spoken when known (verbose_json or a fixed language); the renderer guesses it from the text otherwise
+    const done = (j, lang) => { const text = String((j && j.text) ?? '').trim(); return text ? { ok: true, text, language: lang || '' } : { ok: false, error: 'No speech was recognised.' }; };
+    if (fixed) { const r = await once(fixed, false, hint); return r.res.ok ? done(r.j, fixed) : fail(r); }
+    // Automatic language: Whisper detects it (no language sent); verbose_json also says which language it heard.
+    let r = await once('', true, hint);
+    if (!r.res.ok && r.res.status === 400) r = await once('', false, hint); // a server without verbose_json
     if (!r.res.ok) return fail(r);
     const heard = r.j && r.j.language;
-    if (heard && !STT_LANG_OK.test(String(heard))) {
-      logger.info('voice', `Heard "${heard}", which is not English: trying English`);
-      const score = (j) => { const sg = (j && j.segments) || []; return sg.length ? sg.reduce((a, x) => a + (Number(x.avg_logprob) || -3), 0) / sg.length : -3; };
-      const tries = [];
-      for (const l of ['en']) { try { const x = await once(l, true, hint); if (x.res.ok && x.j && String(x.j.text || '').trim()) tries.push(x.j); } catch {} }
-      if (tries.length) { tries.sort((a, b) => score(b) - score(a)); return done(tries[0]); }
+    const code = sttLang(heard);
+    if (heard && !code) {
+      // a short sentence is sometimes taken for Icelandic, Welsh or another language the user does not speak: redo it as English
+      logger.info('voice', `Heard "${heard}", which is not one of the offered languages: trying English`);
+      try { const x = await once('en', true, hint); if (x.res.ok && x.j && String(x.j.text || '').trim()) return done(x.j, 'en'); } catch {}
     }
-    return done(r.j);
+    if (heard) logger.info('voice', `Speech-to-text language: ${code || heard}`);
+    return done(r.j, code);
   } catch (e) { logger.error('voice', 'Speech-to-text failed: ' + ((e && e.message) || e)); return { ok: false, error: 'Speech-to-text failed: ' + ((e && e.message) || e) }; }
 }
 
@@ -623,7 +779,7 @@ function stashImages(messages) {
     return { ...m, content: flat ? parts.map((c) => c.text).join('\n\n') : parts };
   });
 }
-async function executeRun({ requestId, model: model0, messages, project, system, maxTokens, send: rawSend, restrict, incognito, source, unattended, allowEdits, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort }) {
+async function executeRun({ requestId, model: model0, messages, project, system, maxTokens, send: rawSend, restrict, incognito, source, unattended, allowEdits, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort, mentions }) {
   const model = liveModel(model0);
   let usesFloat = false;
   const t0 = Date.now();
@@ -632,7 +788,12 @@ async function executeRun({ requestId, model: model0, messages, project, system,
     switch (ev.type) {
       case 'error': logger.error('chat', ev.message || 'Error', { chat: chatId, model }); break;
       case 'notice': logger.warn('chat', ev.text); break;
-      case 'tool:call': logger.info('tool', `${who}${ev.name}`, ev.args); break;
+      case 'tool:call': { // only a short summary: args can hold file contents or secrets
+        const a = ev.args && typeof ev.args === 'object' ? ev.args : {};
+        let s = ''; try { s = typeof ev.args === 'string' ? ev.args : JSON.stringify(a); } catch {}
+        logger.info('tool', `${who}${ev.name}`, { keys: Object.keys(a).slice(0, 12), preview: String(s || '').replace(/\s+/g, ' ').slice(0, 120) });
+        break;
+      }
       case 'tool:result': (ev.ok ? logger.info : logger.warn)('tool', `${who}${ev.denied ? 'denied' : ev.ok ? 'ok' : 'failed'}: ${String(ev.text || '').replace(/\s+/g, ' ').slice(0, 160)}`); break;
       case 'tool:approval': logger.info('approval', `${ev.agent ? (ev.agent.name || ev.agent) + ' · ' : ''}${ev.summary || ev.category}`); break;
       case 'agent:start': logger.info('agent', `${(ev.agent && ev.agent.name) || ev.name || 'agent'} started`, { task: ev.task }); break;
@@ -648,8 +809,10 @@ async function executeRun({ requestId, model: model0, messages, project, system,
   const mSteps = [''];
   const userText = (() => { const m = Array.isArray(messages) ? messages[messages.length - 1] : null; const c = m && m.content; return (typeof c === 'string' ? c : (c || []).filter((p) => p.type === 'text').map((p) => p.text).join(' ')).trim(); })();
   if (mirror && userText) mirror.send('💻 ' + userText).catch(() => {});
-  const toolLog = []; let lastText = '', hadError = false;
+  const toolLog = []; let lastText = '', hadError = false, stopReason = '';
   const send = (ev) => {
+    if (ev.type === 'error' && ev.message) stopReason = stopReason || String(ev.message);
+    else if (ev.type === 'notice' && /^Stopped:/.test(String(ev.text || ''))) stopReason = String(ev.text).replace(/^Stopped:\s*/, '');
     try { logEv(ev); } catch {}
     if (ev.type === 'tool:call') toolLog.push({ name: ev.name, args: ev.args });
     else if (ev.type === 'step:new') lastText = '';
@@ -721,14 +884,18 @@ async function executeRun({ requestId, model: model0, messages, project, system,
       }
     }
     await runAgent({
-      persona, sessionId: chatId || undefined,
+      persona, sessionId: chatId || undefined, userData: app.getPath('userData'), mentions: Array.isArray(mentions) ? mentions.slice(0, 20) : [],
       baseUrl: runRoute.baseUrl, key: runRoute.key, model: runRoute.model, noToolCalls: !!runRoute.noTools, messages: runRoute.noTools ? stashImages(messages) : messages, maxTokens: maxTokens || settings.maxTokens, reasoningEffort: effort === 'auto' ? '' : (effort || settings.reasoningEffort || ''),
       custom: system, personality: require('./personality').text(settings), userName: settings.profileName || '', userAbout: settings.profileAbout || '', userLocation: settings.profileLocation || '', project, root: fileRoot, defaultRoot: !root,
       webEnabled: settings.webEnabled, shellEnabled: settings.shellEnabled && !restrict,
       computer: settings.computerEnabled && !restrict && process.platform === 'darwin' ? computer : null,
       schedule: unattended || restrict ? null : { list: () => scheduler.list(), save: (j) => scheduler.save({ ...j, projectId: j.projectId !== undefined ? j.projectId : (project?.id || null) }), remove: (id) => scheduler.remove(id) },
+      lockApp: unattended || restrict ? null : () => lock.lock('ai'),
+      appShot: unattended || restrict ? null : appScreenshot, withArtemisVisible: unattended || restrict ? null : withArtemisVisible,
       notes: settings.notesAi !== false ? notesStore : null,
+      library: settings.notesAi !== false ? library : null,
       term: settings.shellEnabled && !restrict && !unattended && process.platform !== 'win32' ? termApi : null,
+      browser: settings.browserTools !== false && !restrict && !unattended ? browser.agent(requestId) : null,
       phone: remote?.phone() || null, media: mediaApi(settings, controller.signal), mcp: settings.connectorsEnabled === false ? null : mcp, mcpLazy: settings.connectorsLazy !== false, fullFileAccess: settings.fullFileAccess !== false, lazyTools: settings.toolsLazy !== false,
       skills: settings.skillsEnabled !== false ? { index: () => skills.indexText(root), get: (n) => skills.get(n, root), save: (o) => skills.save(o, root) } : null,
       autoLearn: settings.autoLearn !== false && !incognito && !unattended,
@@ -740,26 +907,34 @@ async function executeRun({ requestId, model: model0, messages, project, system,
       make: settings.makeEnabled !== false && getSecret('makeToken') ? make : null,
       computerHooks: {
         onStart: () => {
-          usesFloat = true;
-          if (++computerRuns > 1) { floater?.open(); return; }
-          try { new Notification({ title: 'Artemis is controlling your computer', body: 'Press Cmd/Ctrl+Shift+Esc to stop.' }).show(); } catch {}
+          const viaWidget = sentinelOn(); // Sentinel is on: its widget shows the steps, the floating step panel stays closed
+          usesFloat = !viaWidget;
+          if (++computerRuns > 1) { if (!viaWidget) floater?.open(); return; }
+          try { if (!viaWidget) new Notification({ title: 'Artemis is controlling your computer', body: 'Press Cmd/Ctrl+Shift+Esc to stop.' }).show(); } catch {}
           try { globalShortcut.register('CommandOrControl+Shift+Escape', stopAll); } catch {}
-          floater?.open();
+          // the widget stays visible to you but out of the screenshots the model takes (like the floating panel)
+          try { const sw = sentinelWidget && sentinelWidget.window; if (sw) sw.setContentProtection(true); } catch {}
+          if (viaWidget) { try { if (sentinelWidget) sentinelWidget.send('sentinel:cmd', 'expand'); } catch {} } else floater?.open();
           quick?.hide();
-          if (win && !win.isDestroyed()) win.minimize();
+          // You were working in Artemis: it steps aside (minimizes) so the screen behind it can be seen, and comes back at the end.
+          // You were somewhere else (e.g. talking to Sentinel from another app): the window is never moved or brought forward;
+          // it is only hidden from screenshots, so you stay exactly where you are.
+          computerWinWasUp = !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized() && win.isFocused();
+          if (win && !win.isDestroyed()) { if (computerWinWasUp) win.minimize(); else { try { win.setContentProtection(true); } catch {} } }
         },
         onEnd: () => {
           usesFloat = false;
           if (--computerRuns > 0) return;
           try { globalShortcut.unregister('CommandOrControl+Shift+Escape'); } catch {}
           setTimeout(() => { if (computerRuns === 0) floater?.close(); }, 600);
-          if (win && !win.isDestroyed()) { win.restore(); win.show(); }
+          try { const sw = sentinelWidget && sentinelWidget.window; if (sw) sw.setContentProtection(false); } catch {}
+          if (win && !win.isDestroyed()) { try { win.setContentProtection(false); } catch {} if (computerWinWasUp) { logRaise('computer control finished; the window was in front when it started, so it comes back'); win.restore(); win.show(); } }
         }
       },
       shouldStop: () => limitState().blocked,
       runTokenBudget: Number(settings.runTokenBudget) || undefined, contextTokens: Number(settings.contextTokens) || undefined,
       toolsEnabled: toolsMode === 'on' ? true : toolsMode === 'off' ? false : settings.toolsEnabled, memoryEnabled: settings.memoryEnabled && !incognito, incognito: !!incognito,
-      onUsage: incognito ? null : (u) => recordUsage({ t: Date.now(), model: u.model || model, chat: chatId || '', project: project?.name || '', source: source || 'app', prompt: u.prompt, completion: u.completion, cached: u.cached || 0, estimated: u.estimated }),
+      onUsage: incognito ? null : (u) => recordUsage({ t: Date.now(), model: u.model || model, chat: chatId || '', project: project?.name || '', source: source || 'app', prompt: u.prompt, completion: u.completion, cached: u.cached || 0, cacheWrite: u.cacheWrite || 0, estimated: u.estimated }),
       autoApprove: unattended ? !!allowEdits : perm !== 'ask',
       autoAll: !unattended && perm === 'auto',
       agentAutoApprove: !unattended && (perm === 'auto' || (perm === 'edits' && settings.agentWriteApproval === false)),
@@ -767,6 +942,8 @@ async function executeRun({ requestId, model: model0, messages, project, system,
       approve: (info) => unattended ? Promise.resolve(info.category === 'phone') : new Promise((resolve) => {
         myApprovals.add(info.id);
         approvals.set(info.id, resolve);
+        if (approvalMeta.size > 200) approvalMeta.clear();
+        approvalMeta.set(info.id, { name: info.name, category: info.category });
         send({ type: 'tool:approval', id: info.id, category: info.category, session: !!info.session, summary: info.summary, agent: info.agent });
       }),
       send, signal: controller.signal
@@ -786,15 +963,26 @@ async function executeRun({ requestId, model: model0, messages, project, system,
   } finally {
     for (const id of myApprovals) { const r = approvals.get(id); if (r) { approvals.delete(id); r(false); } }
     runs.delete(requestId);
+    browser.agentDone(requestId);
     if (mirror) { const final = mSteps.filter(Boolean).join('\n\n').trim(); if (final) { mirror.addTurn(userText, final); mirror.send(final).catch(() => {}); } }
     send({ type: 'done' });
+    // A task that stopped on its own (error, repeat guard, limit) while you were elsewhere: say so with a notification.
+    // Not when you pressed Stop yourself, and not when the Artemis window is in front (you can see it there).
+    try {
+      const aborted = !!(controller && controller.signal && controller.signal.aborted);
+      const looking = !!(win && !win.isDestroyed() && win.isFocused());
+      if (stopReason && !aborted && !looking && !unattended && Notification.isSupported()) {
+        new Notification({ title: 'Artemis stopped', body: stopReason.slice(0, 180), silent: false }).show();
+        logger.info('chat', 'Stop notification shown: ' + stopReason.slice(0, 120));
+      }
+    } catch {}
   }
 }
 
-ipcMain.handle('chat:run', (e, { requestId, model, messages, project, system, maxTokens, incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort }) => {
+ipcMain.handle('chat:run', (e, { requestId, model, messages, project, system, maxTokens, incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort, mentions }) => {
   const wc = e.sender;
   const send = (ev) => { if (!wc.isDestroyed()) wc.send('chat:event', { requestId, ...ev }); };
-  return executeRun({ requestId, model, messages, project, system, maxTokens, send, incognito: !!incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort });
+  return executeRun({ requestId, model, messages, project, system, maxTokens, send, incognito: !!incognito, permMode, chatId, brain, brainPick, revote, agentsMode, toolsMode, effort, mentions });
 });
 ipcMain.handle('chat:compact', (_e, o = {}) => compactSummary(o));
 async function compactSummary({ model, messages, chatId, incognito } = {}) {
@@ -811,8 +999,31 @@ async function compactSummary({ model, messages, chatId, incognito } = {}) {
     return { ok: true, summary };
   } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
 }
+// Automatic chat title: one small completion with the first message and the start of the reply (see electron/titles.js).
+// A failure keeps the old title; it is logged once per session.
+let titleWarned = false;
+ipcMain.handle('chat:title', async (_e, o = {}) => {
+  try {
+    const settings = getSettings();
+    if (settings.autoTitles === false || o.incognito) return { ok: false, error: 'Automatic titles are off.' };
+    const own = liveModel(o.model || settings.model);
+    let m = settings.titleModel ? liveModel(settings.titleModel) : own;
+    let route = providersLib.resolve(m, readProviders(), getProviderKey);
+    if (route.error && m !== own) { m = own; route = providersLib.resolve(m, readProviders(), getProviderKey); }
+    if (route.error) throw new Error(route.error);
+    const url = providersLib.joinUrl(route.baseUrl, 'chat/completions');
+    const r = await titlesLib.requestTitle({ url, key: route.key, model: route.model, headers: providersLib.headersFor(url), extraBody: providersLib.routingBody(url),
+      first: String(o.first || ''), reply: String(o.reply || ''), recent: Array.isArray(o.recent) ? o.recent : [] });
+    if (r.usage) recordUsage({ t: Date.now(), model: m, chat: o.chatId || '', project: '', source: 'title', prompt: r.usage.prompt, completion: r.usage.completion, cached: 0, estimated: false });
+    return r.title ? { ok: true, title: r.title } : { ok: false, error: 'The model gave no usable title.' };
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (!titleWarned) { titleWarned = true; logger.warn('titles', 'Could not make a chat title (keeping the old one): ' + msg); } else logger.debug('titles', 'Title failed: ' + msg);
+    return { ok: false, error: msg };
+  }
+});
 ipcMain.handle('chat:abort', (_e, requestId) => { runs.get(requestId)?.abort(); });
-function stopAll() { for (const c of runs.values()) c.abort(); }
+function stopAll() { for (const c of runs.values()) c.abort(); computer?.stopRecording?.().catch(() => {}); } // a screen recording is finalized, not left running
 ipcMain.handle('float:stop', () => stopAll());
 let computer = null;
 let floater = null;
@@ -820,7 +1031,11 @@ let computerRuns = 0;
 let remote = null;
 
 // ---------- tray, quick chat, shortcuts ----------
-function showMain() {
+// Every path that brings the main window forward goes through here (or logs itself), with the reason, so a report of
+// "Artemis jumped to the front" can be traced in the logs. Nothing a run does on its own (Sentinel, agent browser, computer tools) may call it.
+function logRaise(reason) { try { logger.info('window', `Bringing the main window forward: ${reason}${win && !win.isDestroyed() && !win.isFocused() ? ' (it was in the background)' : ''}`); } catch {} }
+function showMain(reason) {
+  logRaise(typeof reason === 'string' ? reason : 'user action');
   if (!win || win.isDestroyed()) createWindow();
   if (win.isMinimized()) win.restore();
   const mac = process.platform === 'darwin';
@@ -832,31 +1047,217 @@ function showMain() {
   quick?.hide();
 }
 
-let registeredAccel = '';
-let registeredPalette = '';
-let paletteSnap = { chats: [], actions: [] }; // last chats and actions the main window sent; the palette window shows them
-function openPalette() {
-  // a small floating window over whatever app is in front; picking something brings Artemis up and runs it there
-  palette?.toggle();
+// ---------- app lock: window state, password prompt, webcam photo, Telegram alert ----------
+const lockHidden = new Set(); // windows hidden when the app locked, shown again on unlock
+function hideForLock() {
+  try { quick?.hide(); } catch {}
+  try { browser.setCovered(false); } catch {} // the browser view floats above the page: hide it behind the lock screen
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w === win || (sentinelWidget && w === sentinelWidget.window) || w.isDestroyed() || !w.isVisible()) continue;
+    lockHidden.add(w); try { w.hide(); } catch {}
+  }
 }
+function showAfterUnlock() {
+  try { browser.setCovered(true); } catch {}
+  for (const w of lockHidden) { try { if (!w.isDestroyed()) w.show(); } catch {} }
+  lockHidden.clear();
+}
+function onLockState(st) {
+  for (const w of BrowserWindow.getAllWindows()) { try { w.webContents.send('lock:state', st); } catch {} }
+  if (st.locked) hideForLock(); else showAfterUnlock();
+  try { if (sentinelWidget) syncSentinel(); rebuildTray && rebuildTray(); } catch {}
+}
+/** Asks the main window for the password (to approve a sensitive action when Touch ID is not available). Resolves null when cancelled. */
+function askPasswordInWindow(reason) {
+  return new Promise((resolve) => {
+    if (!win || win.isDestroyed()) return resolve(null);
+    const id = crypto.randomUUID(); lockAuthWaiting.set(id, resolve);
+    showMain('a password is needed to approve an action');
+    try { win.webContents.send('lock:auth-request', { id, reason }); } catch { lockAuthWaiting.delete(id); return resolve(null); }
+    setTimeout(() => { if (lockAuthWaiting.delete(id)) resolve(null); }, 90000);
+  });
+}
+/** One frame from the webcam, asked of the main window's page (null when there is no camera, no permission, or no window). */
+function snapPhoto() {
+  return new Promise((resolve) => {
+    if (!win || win.isDestroyed()) return resolve(null);
+    const id = crypto.randomUUID(); snapWaiting.set(id, resolve);
+    try { win.webContents.send('lock:snap', { id }); } catch { snapWaiting.delete(id); return resolve(null); }
+    setTimeout(() => { if (snapWaiting.delete(id)) resolve(null); }, 10000);
+  });
+}
+const alertQueue = []; let alertTimer = null;
+async function flushAlerts() {
+  alertTimer = null;
+  while (alertQueue.length) {
+    const a = alertQueue[0];
+    const ph = remote && remote.phone && remote.phone();
+    try {
+      if (!ph) throw new Error('Telegram is not connected and paired (Settings → Phone)');
+      if (a.photo) { try { await ph.sendPhoto(a.photo, a.text); } catch { await ph.send(a.text + '\n(The photo could not be sent.)'); } } else await ph.send(a.text);
+      alertQueue.shift(); logger.info('lock', 'Unauthorized-access alert sent to Telegram');
+    } catch (e) {
+      a.tries = (a.tries || 0) + 1;
+      if (a.tries >= 30) { alertQueue.shift(); logger.error('lock', 'Giving up on an alert: ' + ((e && e.message) || e)); continue; }
+      logger.warn('lock', 'The alert is not sent yet (' + ((e && e.message) || e) + '); trying again in a minute');
+      alertTimer = setTimeout(flushAlerts, 60000); return;
+    }
+  }
+}
+/** Too many failed attempts: a notice on this Mac, and a Telegram message (with a webcam photo when that is on). */
+async function onLockAlert(info) {
+  const cfg = lock.getConfig();
+  logger.warn('lock', `Unauthorized access: ${info.attempts} failed ${info.kind} attempts, locked for ${info.minutes} min`);
+  try { if (Notification.isSupported()) new Notification({ title: 'Artemis is locked', body: `${info.attempts} failed attempts. Locked for ${info.minutes} min.` }).show(); } catch {}
+  if (!cfg.alertTelegram) return;
+  const what = { voice: 'a voice that is not yours', password: 'a wrong password or recovery code', touchid: 'Touch ID' }[info.kind] || info.kind;
+  const when = new Date(info.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const text = `Unauthorized access attempt on ${os.hostname()}\n${info.attempts} failed attempts (${what}) at ${when}. Artemis is locked for ${info.minutes} min.`;
+  const photo = cfg.photoOnLockdown ? await snapPhoto() : null;
+  alertQueue.push({ text, photo, tries: 0 });
+  if (!alertTimer) await flushAlerts();
+}
+
+/** Settings → Security "Send test": the same message and photo as a real alert, sent now (not queued), so a wrong setup shows up here. */
+async function testLockAlert() {
+  const ph = remote && remote.phone && remote.phone();
+  if (!ph) return { ok: false, error: 'Telegram is not connected and paired yet (Settings → Phone).' };
+  const cfg = lock.getConfig();
+  const text = `Test alert from Artemis on ${os.hostname()}. This is how an unauthorized-access alert will look.`;
+  try {
+    const photo = cfg.photoOnLockdown ? await snapPhoto() : null;
+    if (photo) { try { await ph.sendPhoto(photo, text); } catch { await ph.send(text + '\n(The photo could not be sent.)'); } } else await ph.send(text + (cfg.photoOnLockdown ? '\n(No camera photo: allow the camera in Settings → Access.)' : ''));
+    return { ok: true };
+  } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+}
+
+const SHORTCUT_KEYS = ['quickChatShortcut', 'quickSearchShortcut', 'paletteShortcut', 'paletteFromQuickShortcut', 'sentinelShortcut', 'lockShortcut', 'sentinelPtt'];
+let registeredAccels = []; // global shortcuts Artemis registered, unregistered before re-registering and on quit
+let paletteSnap = { chats: [], actions: [] }; // last chats and actions the main window sent; the Quick window's Search tab shows them
+// Same rules as src/lib/shortcuts.mjs (main cannot load the renderer's ESM): one form per platform, '' = invalid
+const ACCEL_MODS = { command: 'Meta', cmd: 'Meta', super: 'Meta', meta: 'Meta', control: 'Ctrl', ctrl: 'Ctrl', alt: 'Alt', option: 'Alt', altgr: 'Alt', shift: 'Shift' };
+function normAccel(accel) {
+  const parts = String(accel || '').trim().replace(/\+\+$/, '+Plus').split('+').map((x) => x.trim());
+  if (!parts[0] || parts.some((x) => !x)) return '';
+  const mods = new Set(); let key = '';
+  for (const x of parts) {
+    const l = x.toLowerCase();
+    if (l === 'commandorcontrol' || l === 'cmdorctrl') mods.add(process.platform === 'darwin' ? 'Meta' : 'Ctrl');
+    else if (ACCEL_MODS[l]) mods.add(ACCEL_MODS[l]);
+    else if (key || !ACCEL_KEY.test(l)) return '';
+    else key = l === 'return' ? 'enter' : l === 'esc' ? 'escape' : l === 'del' ? 'delete' : l;
+  }
+  return key ? ['Meta', 'Ctrl', 'Alt', 'Shift'].filter((m) => mods.has(m)).concat(key).join('+') : '';
+}
+const ACCEL_KEY = /^([a-z0-9,./`[\]\\;'=-]|f([1-9]|1\d|2[0-4])|space|tab|backspace|delete|del|insert|return|enter|escape|esc|up|down|left|right|home|end|pageup|pagedown|plus)$/;
+/** A menu item only shows a valid accelerator: Menu.buildFromTemplate throws on a bad one. */
+const menuAccel = (a) => (normAccel(a) ? String(a).trim() : undefined);
+/**
+ * The Quick chat shortcut (default Cmd/Ctrl+Shift+Space) opens or hides the Quick window on its Chat tab, from any app.
+ * With "paletteFromQuickShortcut" on and the Artemis window in front it opens the command palette instead (the old behaviour).
+ */
+function onQuickChatShortcut() {
+  if (lock.isLocked()) return; // locked: no Quick window
+  if (getSettings().paletteFromQuickShortcut && win && !win.isDestroyed() && win.isVisible() && win.isFocused() && !quick.isVisible()) { try { win.webContents.send('menu', 'palette'); } catch {} return; }
+  quick.toggle('chat');
+}
+/** The Quick search shortcut (off by default) opens the Quick window straight on its Search tab. */
+function onQuickSearchShortcut() { if (lock.isLocked()) return; quick.toggle('search'); }
+/** The lock shortcut (default ⇧⌥⌘L) locks Artemis from any app. */
+function onLockShortcut() { const r = lock.lock('shortcut'); logger.info('shortcut', r.ok ? 'Lock shortcut pressed: locked' : 'Lock shortcut pressed: ' + r.error); }
+/** The Sentinel shortcut (default Cmd/Ctrl+Shift+A) turns Sentinel on or off from any app. The window stays where it is (hidden or minimized is fine). */
+function onSentinelShortcut() { logger.info('shortcut', 'Sentinel on/off shortcut pressed'); if (win && !win.isDestroyed()) win.webContents.send('sentinel:action', 'toggle'); else logger.warn('shortcut', 'Sentinel shortcut: no main window'); }
+/**
+ * Push-to-talk from any app (Settings → Voice, "sentinelPtt"). globalShortcut only reports the key press, never the release, and
+ * on macOS a registered accelerator is consumed system-wide, our own window included. So:
+ * - while the Artemis main window is focused the accelerator is unregistered, and the renderer's keydown/keyup handler does
+ *   hold-to-talk (hold to speak, let go to send);
+ * - in any other app it is registered and works as tap-to-talk: the renderer gets "ptt" and starts listening (turning Sentinel on
+ *   if needed), the next press sends, and a pause in speech also ends it.
+ * Settings records only combinations (⌘ / ⌥ / ⌃ + a key, e.g. Alt+Space -> accelerator "Alt+Space"), which can all be global. An
+ * older single-key or lone-modifier setting (Right Option, a key without Cmd/Ctrl/Alt) still works, but only in the window.
+ */
+let pttAccel = ''; // the accelerator to register while the main window is not focused ('' = none)
+let pttOn = false; // registered right now
+function onPttShortcut() { logger.info('shortcut', 'Push-to-talk shortcut pressed (another app in front)'); if (win && !win.isDestroyed()) win.webContents.send('sentinel:action', 'ptt'); }
+function syncPttShortcut() {
+  const focused = !!(win && !win.isDestroyed() && win.isFocused && win.isFocused());
+  const want = !!pttAccel && !focused;
+  if (want === pttOn) return;
+  try {
+    if (want) pttOn = globalShortcut.register(pttAccel, onPttShortcut);
+    else { globalShortcut.unregister(pttAccel); pttOn = false; }
+  } catch { pttOn = false; }
+}
+function unregisterShortcuts() {
+  for (const a of registeredAccels) { try { globalShortcut.unregister(a); } catch {} }
+  registeredAccels = [];
+  if (pttOn) { try { globalShortcut.unregister(pttAccel); } catch {} }
+  pttAccel = ''; pttOn = false; // also while a shortcut box in Settings records (shortcuts:pause): no window focus change brings it back
+}
+/** (Re-)registers the global shortcuts from settings. Failures end up in shortcutError / shortcutErrors, which Settings shows. */
 function applyShortcut() {
-  shortcutError = '';
-  if (registeredAccel) { try { globalShortcut.unregister(registeredAccel); } catch {} registeredAccel = ''; }
-  if (registeredPalette) { try { globalShortcut.unregister(registeredPalette); } catch {} registeredPalette = ''; }
-  const accel = String(getSettings().quickChatShortcut || '').trim();
+  shortcutError = ''; shortcutErrors = {};
+  unregisterShortcuts();
+  const st = getSettings();
+  const taken = new Map(); // normalized accelerator -> setting key that has it
+  const fail = (k, msg) => { shortcutErrors[k] = msg; shortcutError = (shortcutError ? shortcutError + ' ' : '') + msg; logger.warn('shortcut', `${k}: ${msg}`); };
+  const globals = [['quickChatShortcut', 'Quick chat', onQuickChatShortcut], ['quickSearchShortcut', 'Quick search', onQuickSearchShortcut], ['sentinelShortcut', 'Sentinel on/off', onSentinelShortcut], ['lockShortcut', 'Lock Artemis', onLockShortcut]];
+  for (const [k, label, fn] of globals) {
+    const accel = String(st[k] || '').trim();
+    if (!accel) continue;
+    const norm = normAccel(accel);
+    if (!norm) { fail(k, `Invalid shortcut "${accel}". Example: CommandOrControl+Shift+Space`); continue; }
+    if (taken.has(norm)) { fail(k, `"${accel}" is already the ${taken.get(norm)} shortcut.`); continue; }
+    try {
+      if (globalShortcut.register(accel, fn)) { registeredAccels.push(accel); taken.set(norm, label); logger.info('shortcut', `${label}: ${accel} registered`); }
+      else fail(k, `Could not register "${accel}". Another app may be using it.`);
+    } catch (e) { fail(k, `Invalid shortcut "${accel}". Example: CommandOrControl+Shift+Space`); }
+  }
+  // the palette shortcut is matched in the renderer, so it is not registered; a global shortcut with the same keys would swallow it
+  const pal = String(st.paletteShortcut || '').trim();
+  if (pal) {
+    const norm = normAccel(pal);
+    if (!norm) fail('paletteShortcut', `Invalid shortcut "${pal}". Example: CommandOrControl+K`);
+    else if (taken.has(norm)) fail('paletteShortcut', `"${pal}" is already the ${taken.get(norm)} shortcut.`);
+    else if (norm) taken.set(norm, 'Command palette');
+  }
+  // push-to-talk: registered only while the main window is not focused (see syncPttShortcut); tried once here so a clash shows in Settings
+  const accel = pttAccelerator(st.sentinelPtt);
   if (accel) {
-    try {
-      if (globalShortcut.register(accel, () => quick.toggle())) registeredAccel = accel;
-      else shortcutError = `Could not register "${accel}". Another app may be using it.`;
-    } catch (e) { shortcutError = `Invalid shortcut "${accel}". Example: CommandOrControl+Shift+Space`; }
+    const norm = normAccel(accel);
+    if (taken.has(norm)) fail('sentinelPtt', `This key is already the ${taken.get(norm)} shortcut.`);
+    else {
+      try {
+        if (globalShortcut.register(accel, onPttShortcut)) { pttAccel = accel; pttOn = true; syncPttShortcut(); logger.info('shortcut', `Push-to-talk: ${accel} registered for other apps`); }
+        else fail('sentinelPtt', 'Could not use this key from other apps: another app may be using it. It still works while Artemis is in front.');
+      } catch { fail('sentinelPtt', 'Could not use this key from other apps. It still works while Artemis is in front.'); }
+    }
   }
-  const pal = String(getSettings().paletteShortcut || '').trim();
-  if (pal && pal !== accel) {
-    try {
-      if (globalShortcut.register(pal, openPalette)) registeredPalette = pal;
-      else shortcutError = (shortcutError ? shortcutError + ' ' : '') + `Could not register "${pal}". Another app may be using it.`;
-    } catch (e) { shortcutError = (shortcutError ? shortcutError + ' ' : '') + `Invalid shortcut "${pal}".`; }
-  }
+}
+
+/** The application menu. Rebuilt when a shortcut setting changes, so the File menu shows the configured keys. */
+function buildAppMenu() {
+  const st = getSettings();
+  const template = [
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+    { label: 'File', submenu: [
+      { label: 'New chat', accelerator: 'CmdOrCtrl+N', click: () => win?.webContents.send('menu', 'new-chat') },
+      { label: 'New tab', accelerator: 'CmdOrCtrl+T', click: () => win?.webContents.send('menu', 'new-tab') },
+      { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => win?.webContents.send('menu', 'close-tab') },
+      { label: 'Settings', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('menu', 'settings') },
+      { type: 'separator' },
+      // the renderer handles the palette shortcut itself (registerAccelerator: false), the menu only shows the key and works by click
+      { label: 'Command palette', accelerator: menuAccel(st.paletteShortcut), registerAccelerator: false, click: () => win?.webContents.send('menu', 'palette') },
+      { label: 'Quick chat', accelerator: menuAccel(st.quickChatShortcut), registerAccelerator: false, click: () => quick?.show('chat') },
+      { label: 'Quick search', accelerator: menuAccel(st.quickSearchShortcut), registerAccelerator: false, click: () => quick?.show('search') },
+      { type: 'separator' },
+      { role: process.platform === 'darwin' ? 'close' : 'quit', accelerator: process.platform === 'darwin' ? 'CmdOrCtrl+Shift+W' : undefined }
+    ] },
+    { role: 'editMenu' }, { role: 'viewMenu' },
+    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, ...(process.platform === 'darwin' ? [{ type: 'separator' }, { role: 'front' }] : [])] }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function applyLoginItem() {
@@ -876,11 +1277,13 @@ function createTray() {
   tray = new Tray(img);
   tray.setToolTip('Artemis');
   const menu = () => Menu.buildFromTemplate([
-    { label: 'Quick chat', accelerator: getSettings().quickChatShortcut || undefined, registerAccelerator: false, click: () => quick.show() },
-    { label: 'Open Artemis', click: showMain },
-    { label: 'New chat', click: () => { showMain(); win?.webContents.send('menu', 'new-chat'); } },
+    { label: 'Quick chat', accelerator: menuAccel(getSettings().quickChatShortcut), registerAccelerator: false, click: () => { if (!lock.isLocked()) quick.show('chat'); } },
+    { label: 'Quick search', accelerator: menuAccel(getSettings().quickSearchShortcut), registerAccelerator: false, click: () => { if (!lock.isLocked()) quick.show('search'); } },
+    { label: 'Open Artemis', click: () => showMain('tray menu: Open Artemis') },
+    { label: 'New chat', click: () => { showMain('tray menu: New chat'); win?.webContents.send('menu', 'new-chat'); } },
     { type: 'separator' },
     { label: sentinelOn() ? 'Turn Sentinel off' : 'Turn Sentinel on (say "Wake up")', click: () => win?.webContents.send('sentinel:action', 'toggle') },
+    { label: lock.isLocked() ? 'Locked' : 'Lock Artemis', enabled: lock.enabled() && !lock.isLocked(), click: () => lock.lock('tray') },
     { label: 'Stop all running tasks', click: () => stopAll() },
     { type: 'separator' },
     { label: 'Quit Artemis', click: () => { quitting = true; app.quit(); } }
@@ -888,16 +1291,34 @@ function createTray() {
   rebuildTray = () => { try { if (process.platform === 'linux') tray.setContextMenu(menu()); tray.setToolTip(sentinelOn() ? 'Artemis · Sentinel is listening' : 'Artemis'); } catch {} };
   if (process.platform === 'linux') tray.setContextMenu(menu());
   else {
-    tray.on('click', () => quick.toggle());
+    tray.on('click', () => { if (!lock.isLocked()) quick.toggle(); });
     tray.on('right-click', () => tray.popUpContextMenu(menu()));
   }
 }
 
 
 // ---------- connectors (MCP) ----------
-const readMcpList = () => readJson('mcp', []);
+// Connector secrets (env values, headers, client secret, OAuth tokens) are stored as 'enc:<base64>' via safeStorage.
+// Plain values from older files still load. Not encStr/decStr: those strip whitespace, which header values need.
+const MCP_ENC = 'enc:';
+const mcpEnc = (v) => {
+  if (typeof v !== 'string' || !v || v.startsWith(MCP_ENC)) return v;
+  try { return safeStorage.isEncryptionAvailable() ? MCP_ENC + safeStorage.encryptString(v).toString('base64') : v; } catch { return v; }
+};
+const mcpDec = (v) => {
+  if (typeof v !== 'string' || !v.startsWith(MCP_ENC)) return v;
+  try { return safeStorage.decryptString(Buffer.from(v.slice(MCP_ENC.length), 'base64')); } catch (e) { logger.warn('mcp', 'A connector secret could not be decrypted: ' + e.message); return ''; }
+};
+const mapVals = (o, f) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, f(v)])) : o);
+const mapMcpSecrets = (c, f) => (!c || typeof c !== 'object' ? c : {
+  ...c, env: mapVals(c.env, f), headers: mapVals(c.headers, f),
+  ...(c.clientSecret !== undefined ? { clientSecret: f(c.clientSecret) } : {}),
+  ...(c.oauth && typeof c.oauth === 'object' ? { oauth: { ...c.oauth, accessToken: f(c.oauth.accessToken), refreshToken: f(c.oauth.refreshToken) } } : {})
+});
+const readMcpList = () => { const l = readJson('mcp', []); return Array.isArray(l) ? l.map((c) => mapMcpSecrets(c, mcpDec)) : []; };
+const writeMcpList = (list) => writeJson('mcp', (list || []).map((c) => mapMcpSecrets(c, mcpEnc)));
 
-const decideTool = (id, ok) => { const r = approvals.get(id); if (r) { approvals.delete(id); r(!!ok); } };
+const decideTool = (id, ok) => { const r = approvals.get(id); approvalMeta.delete(id); if (r) { approvals.delete(id); r(!!ok); } };
 ipcMain.handle('phone:send-file', async (_e, p) => {
   const phone = remote.phone();
   if (!phone) return { ok: false, error: 'No phone paired. Pair Telegram in Settings → Phone.' };
@@ -914,7 +1335,7 @@ async function runScheduled(job) {
   const requestId = 'sch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const proj = job.projectId ? (readJson('projects', []).find((p) => p.id === job.projectId) || null) : null;
   const project = proj ? { name: proj.name, instructions: proj.instructions, ...(proj.folder && fs.existsSync(proj.folder) ? { folder: proj.folder } : {}) } : null;
-  const model = job.model || st.model;
+  const model = job.model || (st.scheduleModel ? liveModel(st.scheduleModel) : '') || st.model; // the task's own model, else the one set for scheduled tasks, else the default
   let text = '', error = '';
   toWinSafe('schedule:start', { requestId, jobId: job.id, name: job.name, prompt: job.prompt, model, projectId: job.projectId || null });
   const send = (ev) => {
@@ -930,7 +1351,7 @@ async function runScheduled(job) {
   } else await executeRun({ requestId, messages: [{ role: 'user', content: job.prompt }], send, restrict: true, source: 'schedule', unattended: true, allowEdits: job.allowEdits,
     model, system: (st.systemPrompt || '') + '\n\nThis is a scheduled task and it is running right now. Do it directly and report the result. The task text is an instruction for you, even when it reads like a message to the user: carry it out (for a reminder, state the reminder to the user) and never reply to it as if it were a chat message. Nobody is there to answer: never ask questions, never ask which method to use, and do not write notes or files unless the task says so. If the task is only a reminder, state the reminder. send_to_phone (Telegram) works in scheduled tasks without asking: use it when the task says to send something to the phone.', maxTokens: st.maxTokens, project });
   const summary = (error ? `Failed: ${error}` : text.trim() || 'Finished.').slice(0, 600);
-  try { if (Notification.isSupported()) { const n = new Notification({ title: job.name, body: summary.slice(0, 160) }); n.on('click', showMain); n.show(); } } catch {}
+  try { if (Notification.isSupported()) { const n = new Notification({ title: job.name, body: summary.slice(0, 160) }); n.on('click', () => showMain('scheduled task notification clicked')); n.show(); } } catch {}
   if (job.notifyPhone) {
     try {
       const ph = remote && remote.phone();
@@ -964,7 +1385,7 @@ function ensureAgentTerm() {
   const r = terminals.open({ cols: 120, rows: 32, cwd: undefined });
   if (!r.ok) throw new Error(r.error || 'Could not start the terminal.');
   agentTerm = r.id;
-  if (win && !win.isDestroyed()) { win.show(); win.webContents.send('term:docked', { id: r.id }); }
+  if (win && !win.isDestroyed()) win.webContents.send('term:docked', { id: r.id }); // shown in the window, which is not brought forward
   return r.id;
 }
 const termApi = {
@@ -985,6 +1406,10 @@ const termApi = {
     return tailLines(id, n);
   }
 };
+
+// ---------- Files library (everything you attach is kept here) ----------
+const { createLibrary } = require('./library');
+const library = createLibrary({ getRoot: () => getSettings().filesFolder || path.join(defaultFilesDir(), 'Files'), files });
 
 // ---------- notes (markdown knowledge base) ----------
 const { createNotes } = require('./notes');
@@ -1023,7 +1448,9 @@ function applyOutsideSettings(patch) {
 async function confirmOutside({ title, detail }) {
   if (getSettings().mcpAlwaysAllow) return 'once'; // the user chose "Always allow" in an earlier prompt
   // The question must be seen even when Artemis is in the background: bring it up and show a free-standing dialog.
-  try { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); } app.focus({ steal: true }); } catch {}
+  // The main window itself stays where it is (minimized / hidden / behind your app); only the free-standing dialog comes up.
+  logRaise('an outside app asked for approval through the Artemis MCP server (dialog only)');
+  try { app.focus({ steal: true }); } catch {}
   try { new Notification({ title: 'Artemis needs your answer', body: String(title || '').slice(0, 120) }).show(); } catch {}
   const r = await dialog.showMessageBox({
     type: 'question', buttons: ['Allow once', 'Allow for 10 minutes', 'Always allow', 'Deny'], defaultId: 3, cancelId: 3, noLink: true,
@@ -1033,10 +1460,11 @@ async function confirmOutside({ title, detail }) {
   return r.response === 0 ? 'once' : r.response === 1 ? 'grant' : false;
 }
 const mcpServer = createMcpServer({
+  isLocked: () => lock.isLocked(),
   getToken: () => (getSettings().mcpServerEnabled ? getSecret('mcpToken') : ''),
   log: (lvl, msg) => logger[lvl === 'warn' ? 'warn' : 'info']('mcp-server', msg),
   tools: () => buildArtemisTools({
-    control: remote.control, getSettings, applySettings: applyOutsideSettings, notes: notesStore, term: termApi,
+    control: remote.control, getSettings, applySettings: applyOutsideSettings, notes: notesStore, term: termApi, lockNow: () => lock.lock('mcp'),
     skills: () => skills.list(null).map((x) => ({ name: x.name, description: x.description, enabled: x.enabled })), confirm: confirmOutside,
     imagesDir: IMAGES_DIR,
     files: {
@@ -1048,7 +1476,7 @@ const mcpServer = createMcpServer({
         if (!p) throw new Error(ps.length ? 'Pass "project": one of ' + ps.map((x) => `"${x.name}"`).join(', ') : 'No project with a folder yet. The user can create one in Artemis (Projects).');
         return p.folder;
       },
-      run: (name, args, o) => tools.run(name, args, { root: o.root, approve: o.approve, session: new Set(), autoApprove: false })
+      run: (name, args, o) => tools.run(name, args, { root: o.root, approve: o.approve, session: new Set(), autoApprove: false, userData: app.getPath('userData') })
     },
     computer: { run: (a) => { if (!computer) throw new Error('Computer control is only available on macOS.'); return computer.run(a); } },
     themes: () => listThemes().themes.map((t) => ({ id: t.id, name: t.name, group: t.group, dark: t.dark }))
@@ -1067,11 +1495,27 @@ const mcpServerInfo = () => {
   return { enabled: !!st.mcpServerEnabled, running: mcpServer.running(), alwaysAllow: !!st.mcpAlwaysAllow, port: Number(st.mcpServerPort) || 8788, token: st.mcpServerEnabled ? getSecret('mcpToken') : '', error: mcpServerError };
 };
 
-// ---------- uygulama ----------
+// ---------- app ----------
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
-app.on('second-instance', () => showMain());
-app.on('before-quit', () => { quitting = true; try { mcpServer.stop(); } catch {} try { sentinelWidget && sentinelWidget.destroy(); } catch {} });
+app.on('second-instance', () => showMain('Artemis was launched again'));
+// Let the window save its pending chats first (ack 'app:flushed', or give up after 1.5 s), then quit for real.
+let flushAsked = false;
+app.on('before-quit', (e) => {
+  quitting = true;
+  if (!flushAsked && win && !win.isDestroyed()) {
+    flushAsked = true;
+    e.preventDefault();
+    let done = false;
+    const go = () => { if (done) return; done = true; ipcMain.removeListener('app:flushed', go); app.quit(); };
+    ipcMain.once('app:flushed', go);
+    setTimeout(go, 1500);
+    try { win.webContents.send('app:flush'); } catch { go(); }
+    return;
+  }
+  flushUsage();
+  try { mcpServer.stop(); } catch {} try { sentinelWidget && sentinelWidget.destroy(); } catch {}
+});
 
 app.whenReady().then(() => {
   if (!gotLock) return;
@@ -1080,26 +1524,8 @@ app.whenReady().then(() => {
     logger.info('app', 'Saved keys check', { userData: app.getPath('userData'), encryption: safeStorage.isEncryptionAvailable(), providers: provs.map((p) => ({ name: p.name, needsKey: p.needsKey, key: !!getProviderKey(p.id), models: (p.models || []).length })) });
   } catch (e) { logger.error('app', 'Key check failed: ' + e.message); }
   { const th = getSettings().theme; nativeTheme.themeSource = th === 'light' || th === 'notion' ? 'light' : th === 'system' ? 'system' : 'dark'; }
-  if (!IS_DEV) {
-    session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
-      cb({ responseHeaders: { ...details.responseHeaders,
-        'Content-Security-Policy': ["default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src artifact:; connect-src 'self' blob: data:"] } });
-    });
-  }
-  const template = [
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
-    { label: 'File', submenu: [
-      { label: 'New chat', accelerator: 'CmdOrCtrl+N', click: () => win?.webContents.send('menu', 'new-chat') },
-      { label: 'New tab', accelerator: 'CmdOrCtrl+T', click: () => win?.webContents.send('menu', 'new-tab') },
-      { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => win?.webContents.send('menu', 'close-tab') },
-      { label: 'Settings', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.send('menu', 'settings') },
-      { type: 'separator' },
-      { role: process.platform === 'darwin' ? 'close' : 'quit', accelerator: process.platform === 'darwin' ? 'CmdOrCtrl+Shift+W' : undefined }
-    ] },
-    { role: 'editMenu' }, { role: 'viewMenu' },
-    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, ...(process.platform === 'darwin' ? [{ type: 'separator' }, { role: 'front' }] : [])] }
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  // the app page's CSP is a meta tag in index.html; the integrated browser has its own session (electron/browser.js)
+  buildAppMenu();
   try {
     protocol.handle('artifact', (req) => {
       const html = staged.get(new URL(req.url).pathname.slice(1));
@@ -1151,6 +1577,7 @@ app.whenReady().then(() => {
     screenshot: async () => { if (!computer) throw new Error('Computer control is only available on macOS.'); const r = await computer.screenshot(); return r.image; },
     parseFile: files.parseAttachment,
     runChat: ({ requestId, messages, send: toPhone, session }) => {
+      if (lock.isLocked() && lock.getConfig().pausePhone) throw new Error('Artemis is locked on the computer, so it cannot work from the phone right now.');
       const st = getSettings();
       const toWin = (ch, p) => { try { if (win && !win.isDestroyed()) win.webContents.send(ch, p); } catch {} };
       const last = messages[messages.length - 1];
@@ -1174,17 +1601,27 @@ app.whenReady().then(() => {
   if (!getSettings().migAutoApprove2) saveSettings({ migAutoApprove2: true });
   if (!getSettings().migAskDefault) saveSettings({ autoApproveEdits: false, migAskDefault: true }); // everything asks by default
   scheduler.start();
+  try { // encrypt secrets left in plain text by older versions (already encrypted values are kept as they are)
+    const raw = readJson('mcp', []);
+    if (Array.isArray(raw) && safeStorage.isEncryptionAvailable() && JSON.stringify(raw) !== JSON.stringify(raw.map((c) => mapMcpSecrets(c, mcpEnc)))) writeMcpList(raw);
+  } catch (e) { logger.warn('mcp', 'Could not encrypt connector secrets: ' + e.message); }
   mcp.configure(readMcpList()).catch(() => {});
   computer = createComputer({ screenSize: () => screen.getPrimaryDisplay().size, avoid: () => floater.rect() });
   quick = createQuick({ BrowserWindow, screen, isDev: IS_DEV, nativeTheme });
-  palette = createPalette({ BrowserWindow, screen, isDev: IS_DEV });
+  lock.init(); // before the window: its first question is whether it is locked
   createWindow();
   try { createTray(); } catch (e) { tray = null; }
+  try {
+    const { powerMonitor } = require('electron');
+    powerMonitor.on('suspend', () => lock.onSleep());
+    powerMonitor.on('lock-screen', () => lock.onSleep());
+    const idleTimer = setInterval(() => { try { lock.tick(powerMonitor.getSystemIdleTime()); } catch {} }, 5000); if (idleTimer.unref) idleTimer.unref();
+  } catch (e) { logger.warn('lock', 'Idle and sleep locking are not available: ' + ((e && e.message) || e)); }
   applyShortcut();
   applyLoginItem();
-  app.on('activate', () => showMain());
+  app.on('activate', () => showMain('Dock icon clicked (activate)'));
 });
-app.on('will-quit', () => { try { terminals.closeAll(); } catch {} scheduler.stop(); globalShortcut.unregisterAll(); remote?.stop(); mcp.close(); });
+app.on('will-quit', () => { try { terminals.closeAll(); } catch {} scheduler.stop(); unregisterShortcuts(); globalShortcut.unregisterAll(); remote?.stop(); mcp.close(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 // ---------- IPC handlers that touch main's mutable state (kept here) ----------
@@ -1192,25 +1629,23 @@ ipcMain.handle('browser:bounds', (_e, r) => {
   if (!r || ![r.x, r.y, r.width, r.height].every(Number.isFinite)) return false;
   // The renderer measures in CSS pixels; the native view is placed in window units. They differ whenever the page is zoomed (⌘+ / ⌘-).
   let z = 1; try { z = _e.sender.getZoomFactor() || 1; } catch {}
-  browserRect = { x: Math.max(0, Math.round(r.x * z)), y: Math.max(0, Math.round(r.y * z)), width: Math.max(50, Math.round(r.width * z)), height: Math.max(50, Math.round(r.height * z)) };
-  if (browserView) browserView.setBounds(browserRect);
-  return true;
+  return browser.setRect({ x: Math.max(0, Math.round(r.x * z)), y: Math.max(0, Math.round(r.y * z)), width: Math.max(50, Math.round(r.width * z)), height: Math.max(50, Math.round(r.height * z)) });
 });
-ipcMain.handle('browser:visible', (_e, v) => { if (browserView) browserView.setVisible(!!v); return true; });
-ipcMain.handle('browser:nav', (_e, a) => {
-  const wc = browserView && browserView.webContents; if (!wc) return false;
-  if (a === 'back' && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
-  else if (a === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
-  else if (a === 'reload') wc.reload();
-  return true;
-});
+ipcMain.handle('browser:visible', (_e, v) => browser.setCovered(!!v));
+ipcMain.handle('browser:nav', (_e, a) => browser.nav(String(a || '')));
 ipcMain.handle('browser:external', (_e, u) => { if (/^https?:\/\//i.test(String(u || ''))) { shell.openExternal(String(u)); return true; } return false; });
-ipcMain.handle('browser:open', (_e, url) => { if (!/^https?:\/\//i.test(String(url || ''))) return false; return showBrowser(String(url)); });
-ipcMain.handle('browser:close', () => { hideBrowser(); return true; });
-ipcMain.handle('browser:navigate', (_e, url) => { if (browserView && /^https?:\/\//i.test(String(url || ''))) { browserView.webContents.loadURL(String(url)); return true; } return false; });
-ipcMain.handle('sentinel:current', () => sentinelInfo);
+ipcMain.handle('browser:open', (_e, url) => { try { return browser.open(url ? String(url) : ''); } catch (e) { logger.warn('browser', e.message); return false; } });
+ipcMain.handle('browser:close', () => browser.hide());
+ipcMain.handle('browser:navigate', (_e, url) => { try { browser.navigate(String(url || '')); return true; } catch { return false; } });
+ipcMain.handle('browser:tabs', () => browser.state());
+ipcMain.handle('browser:tab-new', (_e, url) => { try { browser.newTab(url ? String(url) : ''); return browser.state(); } catch (e) { logger.warn('browser', e.message); return browser.state(); } });
+ipcMain.handle('browser:tab-select', (_e, id) => { try { browser.select(id); } catch {} return browser.state(); });
+ipcMain.handle('browser:tab-close', (_e, id) => { try { browser.close(id); } catch {} return browser.state(); });
+ipcMain.handle('sentinel:current', () => widgetInfo());
 ipcMain.handle('sentinel:action', (_e, a) => {
-  if (a === 'logs') showMain();
+  if (lock.isLocked() && !['stop', 'skip', 'mute', 'unmute', 'toggle', 'ptt'].includes(a)) return false; // locked: the widget can only stop, skip or mute
+  // Sentinel works with the main window in the background; only these bring it up (the user asked for the app).
+  if (a === 'logs' || a === 'settings' || a === 'show' || a === 'raise') showMain(`Sentinel asked for the app (${a})`);
   win?.webContents.send('sentinel:action', a);
   return true;
 });
@@ -1262,19 +1697,22 @@ ipcMain.handle('sentinel:download', async (e) => {
 });
 ipcMain.handle('quick:resize', (_e, mode) => quick?.resize(mode === 'chips' ? 'chips' : !!mode));
 ipcMain.handle('quick:hide', () => quick?.hide());
+ipcMain.handle('quick:mode', (_e, mode) => quick?.setMode(mode));
+// While a shortcut box in Settings is recording, the global shortcuts are let go, so pressing them reaches the box
+ipcMain.handle('shortcuts:pause', (_e, on) => { if (on) unregisterShortcuts(); else applyShortcut(); return true; });
 ipcMain.handle('quick:keep-open', (_e, on) => quick?.keepOpen(!!on));
 ipcMain.handle('quick:handoff', (_e, chat) => {
-  showMain();
+  showMain('quick chat handed off to the main window');
   const send = () => win?.webContents.send('quick:import', chat);
   if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
 });
 ipcMain.handle('palette:sync', (_e, snap) => { paletteSnap = { chats: Array.isArray(snap?.chats) ? snap.chats : [], actions: Array.isArray(snap?.actions) ? snap.actions : [] }; });
 ipcMain.handle('palette:get', () => paletteSnap);
-ipcMain.handle('palette:hide', () => palette?.hide());
+ipcMain.handle('palette:hide', () => void 0);
 ipcMain.handle('palette:run', (_e, item) => {
-  palette?.hide();
+  quick?.hide();
   const fresh = !win || win.isDestroyed();
-  showMain();
+  showMain('command palette item run');
   const send = () => { try { win.webContents.send('palette:run', item); } catch {} };
   if (fresh || win.webContents.isLoading()) win.webContents.once('did-finish-load', () => setTimeout(send, 400)); else send();
 });
@@ -1284,24 +1722,39 @@ ipcMain.handle('remote:unpair', () => { remote.unpair(); return remote.status();
 
 // ---------- IPC handlers (one module per area, see electron/ipc/) ----------
 // Registered last so every helper they use is initialised; handlers only run later, when the renderer calls them.
-require('./ipc/skills')({ ipcMain, app, dialog, shell, fs, path, skills, createSkillHub, skillRoot, getWin: () => win });
+require('./ipc/skills')({ ipcMain, app, dialog, shell, fs, path, skills, skillRoot, getWin: () => win });
 require('./ipc/themes')({ ipcMain, dialog, shell, fs, path, themes, themeDirs, listThemes, nativeThemeFor, broadcastTheme, getSettings, saveSettings, getWin: () => win });
 require('./ipc/brains')({ ipcMain, brains });
 require('./ipc/agents')({ ipcMain, agents, fs, shell, skillRoot });
 require('./ipc/logs')({ ipcMain, shell, fs, logger });
+// Memory diagnostics (Logs → Memory, Settings → General → Memory, command palette "Show memory use", and every 5 minutes from the window)
+{
+  const memory = require('./memory').createMemory({
+    app, webContents: require('electron').webContents, logger, getWin: () => win,
+    getWidgetWin: () => (sentinelWidget ? sentinelWidget.window : null),
+    browserSession: () => { try { return session.fromPartition('persist:artemis-browser'); } catch { return null; } }
+  });
+  ipcMain.handle('memory:get', (_e, o = {}) => {
+    const extra = { heap: o.heap || null, proc: o.proc || null };
+    return o.log ? memory.logSnapshot(o.reason || 'check', extra) : memory.snapshot(extra);
+  });
+  ipcMain.handle('memory:free', async () => { const done = await memory.free(); logger.info('memory', 'Free memory: ' + (done.join(', ') || 'nothing to clear')); return done; });
+}
 require('./ipc/make')({ ipcMain, MAKE_ZONES, cleanMakeZone, createMake, getSecret, getSettings, logger, make, makeReady, saveSettings, setSecret, validMakeZone });
-require('./ipc/mcp')({ ipcMain, mcp, oauthCallbackServer, oauthPending, parseImport, readMcpList, shell, writeJson });
+require('./ipc/mcp')({ ipcMain, mcp, oauthCallbackServer, oauthPending, parseImport, readMcpList, writeMcpList, shell });
 require('./ipc/schedule')({ ipcMain, scheduler });
-require('./ipc/notes')({ ipcMain, dialog, shell, notesStore, readJson, writeJson, getWin: () => win });
+require('./ipc/notes')({ ipcMain, dialog, shell, notesStore, library, files, readJson, writeJson, getWin: () => win });
 require('./ipc/term')({ ipcMain, BrowserWindow, openTermWindow, termWindows, terminals, getWin: () => win });
 require('./ipc/mcpserver')({ ipcMain, mcpServerInfo, saveSettings, setSecret, syncMcpServer });
 require('./ipc/project')({ ipcMain, dialog, fs, logoDir, nativeImage, path, getWin: () => win });
 require('./ipc/profile')({ ipcMain, avatarData, avatarFile, dialog, fs, nativeImage, path, profileDir, shell, getWin: () => win });
 require('./ipc/sheet')({ ipcMain, BrowserWindow, dialog, files });
-require('./ipc/voice')({ ipcMain, getSettings, logger, providersLib, systemPreferences, transcribeAudio });
-require('./ipc/files')({ ipcMain, BrowserWindow, app, defaultFilesDir, dialog, files, tools, getWin: () => win });
+require('./ipc/voice')({ ipcMain, getSettings, logger, providersLib, systemPreferences, transcribeAudio, fs, path, crypto: require('crypto'), cacheDir: () => path.join(app.getPath('home'), '.artemis', 'tts-cache') });
+require('./ipc/files')({ ipcMain, BrowserWindow, app, defaultFilesDir, dialog, files, tools, library, getWin: () => win });
+require('./ipc/library')({ ipcMain, BrowserWindow, dialog, shell, files, library, getWin: () => win });
 require('./ipc/perm')({ ipcMain, permissions });
+require('./ipc/lock')({ ipcMain, lock, speaker, voiceGate, lockAuthWaiting, snapWaiting, logger, testAlert: testLockAlert });
 require('./ipc/media')({ ipcMain, mediaDir, mediaGen, shell });
-require('./ipc/usage')({ ipcMain, readJson, writeJson });
+require('./ipc/usage')({ ipcMain, getUsage, setUsage });
 require('./ipc/providers')({ ipcMain, encStr, getProviderKey, providersLib, publicProviders, readProviderKeys, readProviders, writeJson });
 require('./ipc/shell')({ ipcMain, fs, shell });
